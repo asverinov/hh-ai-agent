@@ -1,6 +1,8 @@
 import os
 import asyncio
+import random
 from playwright.async_api import async_playwright
+from playwright_stealth import stealth_async
 import database
 from ai_analyzer import is_vacancy_suitable, generate_cover_letter
 from config import SEARCH_QUERIES
@@ -21,13 +23,14 @@ class HHClient:
         headless = os.path.exists(STATE_FILE)
         self.browser = await self.playwright.chromium.launch(headless=headless)
         
-        user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36"
+        user_agent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/142.0.0.0 Safari/537.36"
         if os.path.exists(STATE_FILE):
             self.context = await self.browser.new_context(storage_state=STATE_FILE, user_agent=user_agent)
         else:
             self.context = await self.browser.new_context(user_agent=user_agent)
         
         self.page = await self.context.new_page()
+        await stealth_async(self.page)
 
     async def login_if_needed(self):
         print("Переходим на HH.ru для проверки авторизации...")
@@ -115,14 +118,71 @@ class HHClient:
                     
                         print(f"👁️ Открываем вакансию: {title}")
                         page = await self.context.new_page()
+                        await stealth_async(page)
                         try:
                             await page.goto(href)
                             await asyncio.sleep(2)
                         
                             desc_loc = page.locator('div[data-qa="vacancy-description"]')
-                            if not await desc_loc.is_visible():
-                                print(f"⚠️ Описание не найдено (капча или нестандартный layout): {title}")
-                                continue
+                            # Если описания нет - возможно капча. Запускаем цикл решения.
+                            while not await desc_loc.is_visible():
+                                print(f"⚠️ Описание не найдено. Возможно, вылезла капча: {title}")
+                                import tg_bot
+                                import random
+                                
+                                try:
+                                    # Делаем скриншот видимой области (без full_page, чтобы не триггерить ресайз окна)
+                                    await page.screenshot(path="captcha.png")
+                                    await tg_bot.send_captcha_request("captcha.png", f"🚨 <b>Подозрение на капчу!</b>\nБот застрял на вакансии <i>{title}</i>.\n\nПожалуйста, введите текст с картинки прямо в этот чат (если там два слова, введите через пробел):")
+                                    
+                                    print("Ожидаем ввод капчи из Telegram...")
+                                    # Ожидание снятия блокировки (когда юзер введет текст)
+                                    await tg_bot.captcha_event.wait()
+                                    
+                                    # Вводим текст
+                                    solution = tg_bot.captcha_solution
+                                    print(f"Вводим решение: {solution}")
+                                    
+                                    input_field = page.locator('input[type="text"]').first
+                                    if await input_field.is_visible():
+                                        await input_field.click()
+                                        await asyncio.sleep(random.uniform(0.5, 1.2))
+                                        
+                                        for char in solution:
+                                            if char == " ":
+                                                await asyncio.sleep(random.uniform(0.6, 1.5)) # Медленный пробел между словами
+                                            await input_field.type(char, delay=random.randint(150, 400)) # Человечный ввод
+                                            
+                                        await asyncio.sleep(random.uniform(1.0, 2.5))
+                                        await input_field.press('Enter')
+                                        await asyncio.sleep(5) # Ждем прогрузки после ввода
+                                    else:
+                                        # Если поля ввода нет (возможно это галочка Cloudflare или вы уже решили её в другом браузере)
+                                        # Просто обновляем страницу, чтобы проверить, не снят ли бан по IP
+                                        print("Поле ввода не найдено. Обновляем страницу...")
+                                        await page.reload()
+                                        await asyncio.sleep(4)
+                                    
+                                    # Проверяем, появилось ли описание
+                                    desc_loc = page.locator('div[data-qa="vacancy-description"]')
+                                    if await desc_loc.is_visible():
+                                        try:
+                                            await send_notification_func("✅ Капча успешно пройдена! Бот продолжает работу.")
+                                        except:
+                                            pass
+                                        print("✅ Капча пройдена!")
+                                        break # Выходим из цикла решения капчи
+                                    else:
+                                        try:
+                                            await send_notification_func("❌ Капча решена неверно (или появилась новая). Пробуем еще раз!")
+                                        except:
+                                            pass
+                                        print("❌ Капча не пройдена. Повторная попытка...")
+                                        # Цикл while начнется заново: сделает новый скриншот и попросит ввод
+                                        
+                                except Exception as e:
+                                    print(f"Ошибка при обработке капчи: {e}")
+                                    break # В случае системной ошибки выходим, чтобы не зациклиться
                             description = await desc_loc.inner_text()
 
                             # Базовый жесткий фильтр по названию, чтобы не пускать ИИ на очевидные сеньорские позиции, стажировки или неайтишные профессии
@@ -146,6 +206,13 @@ class HHClient:
                                 # Пробуем откликнуться
                                 apply_btn = page.locator('a[data-qa="vacancy-response-link-top"]').first
                                 if await apply_btn.is_visible():
+                                    # Имитируем поведение человека перед откликом
+                                    await page.mouse.move(random.randint(100, 700), random.randint(100, 500))
+                                    await page.mouse.wheel(0, random.randint(200, 600))
+                                    await asyncio.sleep(random.uniform(0.8, 1.5))
+                                    await page.mouse.wheel(0, random.randint(-200, 100))
+                                    await asyncio.sleep(random.uniform(0.5, 1.0))
+                                    
                                     await apply_btn.click()
                                     # Даем время на открытие попапа ИЛИ загрузку новой страницы отклика
                                     await asyncio.sleep(3)
@@ -245,6 +312,7 @@ class HHClient:
             chat_link = await title_loc.get_attribute("href")
             if chat_link:
                 chat_page = await self.context.new_page()
+                await stealth_async(chat_page)
                 await chat_page.goto(f"https://hh.ru{chat_link}")
                 await asyncio.sleep(3)
                 
