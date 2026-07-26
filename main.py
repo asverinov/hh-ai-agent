@@ -7,10 +7,23 @@ async def agent_loop():
     client = HHClient()
     await client.start()
     
-    # Первая авторизация
-    logged_in = await client.login_if_needed()
+    # Первая авторизация. hh.ru регулярно отдает таймауты и антибот-заглушки,
+    # поэтому одна неудачная попытка не должна убивать весь запуск.
+    logged_in = False
+    for attempt in range(1, 4):
+        try:
+            logged_in = await client.login_if_needed()
+            if logged_in:
+                break
+            print(f"Авторизация не подтверждена (попытка {attempt} из 3).")
+        except Exception as e:
+            print(f"Ошибка при проверке авторизации (попытка {attempt} из 3): {e}")
+        if attempt < 3:
+            print("Повтор через 2 минуты...")
+            await asyncio.sleep(120)
+
     if not logged_in:
-        print("Не удалось авторизоваться. Завершение работы.")
+        print("Не удалось авторизоваться после 3 попыток. Завершение работы.")
         await client.stop()
         return
 
