@@ -8,6 +8,9 @@ from ai_analyzer import is_vacancy_suitable, generate_cover_letter
 from config import SEARCH_QUERIES
 
 STATE_FILE = os.path.join(os.path.dirname(__file__), "state.json")
+# Сколько раз пробовать откликнуться, пока hh не подтвердит отправку. После этого
+# вакансия помечается обработанной: обычно там анкета работодателя.
+MAX_RESPONSE_ATTEMPTS = 3
 
 class HHClient:
     def __init__(self):
@@ -29,16 +32,49 @@ class HHClient:
         else:
             self.context = await self.browser.new_context(user_agent=user_agent)
         
+        # Холодный профиль платит за антибот-проверку hh на первой навигации,
+        # и это легко превышает дефолтные 30 секунд Playwright.
+        self.context.set_default_navigation_timeout(90000)
+
         self.page = await self.context.new_page()
         await Stealth().apply_stealth_async(self.page)
 
+    async def _response_confirmed(self, page, href: str) -> bool:
+        """Проверяет у самого hh.ru, что отклик действительно создан.
+
+        Признак: на вакансии с существующим откликом hh убирает кнопку
+        «Откликнуться». Само отсутствие кнопки ничего не доказывает — её нет
+        и на капче, и на архивной вакансии, поэтому сначала убеждаемся, что
+        перед нами действительно страница вакансии.
+        """
+        try:
+            await page.goto(href.split("?")[0], wait_until="domcontentloaded")
+            await page.locator('div[data-qa="vacancy-description"]').wait_for(
+                state="visible", timeout=20000)
+        except Exception as e:
+            # Не смогли посмотреть страницу — подтверждения нет. Лучше повторить
+            # попытку, чем записать несуществующий отклик как успешный.
+            print(f"⚠️ Не удалось проверить статус отклика: {e}")
+            return False
+
+        return await page.locator('a[data-qa="vacancy-response-link-top"]').count() == 0
+
     async def login_if_needed(self):
         print("Переходим на HH.ru для проверки авторизации...")
-        await self.page.goto("https://hh.ru/")
+        # domcontentloaded, а не load: hh.ru держит websocket чатов и аналитику,
+        # событие load может не наступить вовсе и уронить весь запуск по таймауту.
+        await self.page.goto("https://hh.ru/", wait_until="domcontentloaded")
         await asyncio.sleep(3)
-        
-        # Ждем, пока страница реально прогрузится, чтобы не ловить "пустой" экран
-        await self.page.wait_for_load_state('networkidle')
+
+        # Ждем не networkidle (по той же причине он может не наступить никогда),
+        # а конкретный маркер отрисованной шапки: ссылку на резюме у авторизованного
+        # либо кнопку входа у гостя.
+        try:
+            await self.page.locator(
+                'a[href*="/applicant/resumes"], a:has-text("Войти"), button:has-text("Войти")'
+            ).first.wait_for(timeout=30000)
+        except Exception:
+            print("⚠️ Шапка hh.ru не отрисовалась за 30 с — проверяю страницу как есть.")
         await asyncio.sleep(2)
         
         # Ищем любую ссылку или кнопку с текстом "Войти"
@@ -153,8 +189,20 @@ class HHClient:
                                             await input_field.type(char, delay=random.randint(150, 400)) # Человечный ввод
                                             
                                         await asyncio.sleep(random.uniform(1.0, 2.5))
-                                        await input_field.press('Enter')
-                                        await asyncio.sleep(5) # Ждем прогрузки после ввода
+                                        # На форме капчи есть кнопка «Отправить»; Enter в React-форме
+                                        # её не сабмитит, и верно введенный код никуда не уходит —
+                                        # бот крутится в цикле, запрашивая новую картинку.
+                                        submit_captcha = page.locator(
+                                            'button[type="submit"]:visible, button:has-text("Отправить"):visible'
+                                        ).first
+                                        try:
+                                            if await submit_captcha.is_visible():
+                                                await submit_captcha.click()
+                                            else:
+                                                await input_field.press('Enter')
+                                        except Exception:
+                                            await input_field.press('Enter')
+                                        await asyncio.sleep(6) # Ждем прогрузки после ввода
                                     else:
                                         # Если поля ввода нет (возможно это галочка Cloudflare или вы уже решили её в другом браузере)
                                         # Просто обновляем страницу, чтобы проверить, не снят ли бан по IP
@@ -232,6 +280,19 @@ class HHClient:
                                     except Exception as e:
                                         print(f"⚠️ Ошибка при выборе резюме: {e}")
                                 
+                                    # Шаг 0.5: тест работодателя. Его поля называются task_<id>_text
+                                    # и стоят на странице ПЕРЕД полем письма, поэтому письмо уходило
+                                    # в ответ на первый вопрос теста, а отклик не создавался вовсе.
+                                    # Тест должен проходить человек — отдаем вакансию ему.
+                                    if await page.locator('textarea[name^="task_"]').count() > 0:
+                                        print(f"📝 Вакансия с тестом работодателя, нужен ручной отклик: {title}")
+                                        database.add_applied_job(job_id, title, href)
+                                        await send_notification_func(
+                                            f"📝 Тестовое задание: <a href='{href}'>{title}</a>\n\n"
+                                            f"<i>Работодатель просит ответить на вопросы — откликнитесь вручную.</i>"
+                                        )
+                                        continue
+
                                     # Шаг 1: Ищем кнопку "Написать/Добавить сопроводительное" (если поле изначально скрыто)
                                     toggle_btn = page.locator('[data-qa*="letter-toggle"]').or_(
                                         page.locator('text="Написать сопроводительное"')
@@ -245,10 +306,11 @@ class HHClient:
                                         except:
                                             pass
                                 
-                                    # Шаг 2: Ищем ЛЮБОЕ многострочное поле (textarea) и ждем его появления (до 3 сек)
+                                    # Шаг 2: поле сопроводительного письма — именно письма, а не
+                                    # «любое textarea»: поля теста (task_*) исключены.
                                     letter_sent = False
                                     try:
-                                        letter_textarea = page.locator('textarea').first
+                                        letter_textarea = page.locator('textarea:not([name^="task_"])').first
                                         await letter_textarea.wait_for(state="visible", timeout=3000)
                                         await letter_textarea.fill(cover_letter)
                                         letter_sent = True
@@ -259,21 +321,60 @@ class HHClient:
                                     submit_btn = page.locator('button[data-qa*="vacancy-response-submit"]:visible').first
                                     if await submit_btn.is_visible():
                                         await submit_btn.click() # РЕАЛЬНЫЙ ОТКЛИК
+                                        # Ждем закрытия формы, а не спим вслепую: уйти со страницы
+                                        # раньше — значит оборвать сам запрос отклика.
+                                        try:
+                                            await submit_btn.wait_for(state="hidden", timeout=20000)
+                                        except Exception:
+                                            pass
                                         await asyncio.sleep(2)
-                                    
+
+                                        # Клик != отправленный отклик: hh может потребовать
+                                        # доп. шаг или молча ничего не сделать. Спрашиваем сам сайт,
+                                        # иначе несуществующий отклик попадает в базу как успешный
+                                        # и вакансия теряется навсегда.
+                                        if not await self._response_confirmed(page, href):
+                                            attempts = database.bump_failed_response(job_id, title)
+                                            print(f"❗ Отклик НЕ подтвержден сайтом (попытка {attempts}): {title}")
+                                            if attempts >= MAX_RESPONSE_ATTEMPTS:
+                                                # Хватит: помечаем обработанной, иначе вакансия будет
+                                                # возвращаться при каждом проходе выдачи.
+                                                database.add_applied_job(job_id, title, href)
+                                                await send_notification_func(
+                                                    f"❗ Отклик так и не прошел ({attempts} попытки): "
+                                                    f"<a href='{href}'>{title}</a>\n\n"
+                                                    f"<i>hh.ru не подтвердил отправку — нужен ручной отклик.</i>"
+                                                )
+                                            continue
+
                                         database.add_applied_job(job_id, title, href)
-                                    
+
                                         import html
                                         safe_cover_letter = html.escape(cover_letter)
-                                    
+
                                         if letter_sent:
                                             await send_notification_func(f"✅ Успешный отклик: <a href='{href}'>{title}</a>\n\n<b>Письмо:</b>\n<i>{safe_cover_letter}</i>")
                                         else:
                                             await send_notification_func(f"✅ Отклик без письма: <a href='{href}'>{title}</a>\n\n<i>(Работодатель отключил возможность отправки писем для этой вакансии)</i>")
                                         print(f"✅ Отклик отправлен: {title}")
+                                    else:
+                                        # Форма открылась, но кнопки отправки в ней нет. Без этой ветки
+                                        # вакансия молча возвращалась в обработку на каждом проходе.
+                                        attempts = database.bump_failed_response(job_id, title)
+                                        print(f"❗ Кнопка отправки не найдена в форме (попытка {attempts}): {title}")
+                                        if attempts >= MAX_RESPONSE_ATTEMPTS:
+                                            database.add_applied_job(job_id, title, href)
                                 else:
-                                    print(f"Кнопка отклика не найдена (возможно, уже откликались): {title}")
-                                    database.add_applied_job(job_id, title, href)
+                                    # Кнопки нет — обычно потому, что отклик уже есть. Но так же
+                                    # выглядит недогруженная страница, поэтому не гадаем, а спрашиваем hh.
+                                    if await self._response_confirmed(page, href):
+                                        print(f"Отклик уже был отправлен ранее: {title}")
+                                        database.add_applied_job(job_id, title, href)
+                                    else:
+                                        attempts = database.bump_failed_response(job_id, title)
+                                        print(f"❗ Кнопка отклика не найдена, отклика нет (попытка {attempts}): {title}")
+                                        if attempts >= MAX_RESPONSE_ATTEMPTS:
+                                            database.add_applied_job(job_id, title, href)
                             else:
                                 print(f"❌ ИИ отклонил: {title}")
                                 database.add_applied_job(job_id, title, href) # Добавляем, чтобы больше не анализировать
