@@ -42,14 +42,25 @@ class FakeLocator:
     async def fill(self, value: str) -> None:
         self.filled = value
 
+    async def count(self) -> int:
+        return int(self.visible)
+
     def or_(self, other: "FakeLocator") -> "FakeLocator":
         return self if self.visible else other
 
 
 class FakeApplicationPage:
-    def __init__(self, fail_navigation: bool = False, success_visible: bool = True):
+    def __init__(
+        self,
+        fail_navigation: bool = False,
+        success_visible: bool = True,
+        employer_questions: bool = False,
+        response_still_available: bool = False,
+    ):
         self.fail_navigation = fail_navigation
         self.success_visible = success_visible
+        self.employer_questions = employer_questions
+        self.response_still_available = response_still_available
         self.clicks: list[str] = []
         self.selectors: list[str] = []
         self.closed = False
@@ -60,15 +71,21 @@ class FakeApplicationPage:
 
     def locator(self, selector: str) -> FakeLocator:
         self.selectors.append(selector)
+        if selector == '[data-qa="vacancy-description"]':
+            return FakeLocator(True)
+        if selector == 'textarea[name^="task_"]':
+            return FakeLocator(self.employer_questions)
         if "vacancy-response-success" in selector:
             return FakeLocator(self.success_visible)
         if "vacancy-response-link" in selector:
-            return FakeLocator(True, self.clicks, "open_response")
+            submitted = "final_submit" in self.clicks
+            visible = not submitted or self.response_still_available
+            return FakeLocator(visible, self.clicks, "open_response")
         if "resume-select" in selector:
             return FakeLocator(False)
         if "letter-toggle" in selector or "сопроводительное" in selector:
             return FakeLocator(False)
-        if selector == "textarea":
+        if selector in {"textarea", 'textarea:not([name^="task_"])'}:
             return FakeLocator(True)
         if "vacancy-response-submit" in selector:
             return FakeLocator(True, self.clicks, "final_submit")
@@ -278,6 +295,62 @@ def test_missing_explicit_success_signal_fails_closed(tmp_path: Path) -> None:
     token = database.approve("job-1", 42, 42, NOW + timedelta(minutes=1))
     assert token
     page = FakeApplicationPage(success_visible=False)
+    client = HHClient(
+        FakeApplicationContext(page),
+        app_settings,
+        database,
+        ApprovalGuard(app_settings, database, now_factory=lambda: NOW + timedelta(minutes=2)),
+        sleep=no_sleep,
+        now_factory=lambda: NOW + timedelta(minutes=3),
+    )
+
+    sent = asyncio.run(
+        client.submit_application(ApplicationPermission("job-1", token, 42))
+    )
+
+    assert not sent
+    assert page.clicks == ["open_response", "final_submit"]
+    assert database.get("job-1").status is VacancyStatus.APPLY_FAILED
+
+
+def test_employer_questionnaire_blocks_submit(tmp_path: Path) -> None:
+    app_settings = settings(
+        tmp_path, APP_MODE="approval", ENABLE_REAL_APPLY="true", TG_USER_ID="42"
+    )
+    database = Database(app_settings.database_path)
+    database.init()
+    pending(database)
+    token = database.approve("job-1", 42, 42, NOW + timedelta(minutes=1))
+    assert token
+    page = FakeApplicationPage(employer_questions=True)
+    client = HHClient(
+        FakeApplicationContext(page),
+        app_settings,
+        database,
+        ApprovalGuard(app_settings, database, now_factory=lambda: NOW + timedelta(minutes=2)),
+        sleep=no_sleep,
+        now_factory=lambda: NOW + timedelta(minutes=3),
+    )
+
+    sent = asyncio.run(
+        client.submit_application(ApplicationPermission("job-1", token, 42))
+    )
+
+    assert not sent
+    assert page.clicks == ["open_response"]
+    assert database.get("job-1").status is VacancyStatus.APPLY_FAILED
+
+
+def test_success_marker_without_hh_confirmation_fails_closed(tmp_path: Path) -> None:
+    app_settings = settings(
+        tmp_path, APP_MODE="approval", ENABLE_REAL_APPLY="true", TG_USER_ID="42"
+    )
+    database = Database(app_settings.database_path)
+    database.init()
+    pending(database)
+    token = database.approve("job-1", 42, 42, NOW + timedelta(minutes=1))
+    assert token
+    page = FakeApplicationPage(response_still_available=True)
     client = HHClient(
         FakeApplicationContext(page),
         app_settings,

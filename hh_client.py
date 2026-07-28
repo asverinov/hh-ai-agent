@@ -93,21 +93,51 @@ class HHClient:
     async def ensure_login(self) -> bool:
         page = await self.context.new_page()
         try:
-            await page.goto("https://hh.ru/", wait_until="domcontentloaded", timeout=30_000)
-            login = page.locator('a:has-text("Войти"), button:has-text("Войти")').first
-            if not await login.is_visible():
-                return True
-            if self.settings.browser_headless:
-                logger.error("hh_login_required headless=true")
-                return False
-            await asyncio.to_thread(
-                input,
-                "Sign in to HH.ru in the opened browser, then press Enter here: ",
-            )
-            await page.reload(wait_until="domcontentloaded")
-            return not await login.is_visible()
+            for attempt in range(1, 4):
+                try:
+                    await page.goto(
+                        "https://hh.ru/",
+                        wait_until="domcontentloaded",
+                        timeout=90_000,
+                    )
+                    login = page.locator(
+                        'a:has-text("Войти"), button:has-text("Войти")'
+                    ).first
+                    if not await login.is_visible():
+                        return True
+                    if self.settings.browser_headless:
+                        logger.error("hh_login_required headless=true")
+                        return False
+                    await asyncio.to_thread(
+                        input,
+                        "Sign in to HH.ru in the opened browser, then press Enter here: ",
+                    )
+                    await page.reload(wait_until="domcontentloaded")
+                    return not await login.is_visible()
+                except Exception as exc:
+                    logger.warning(
+                        "hh_login_check_failed attempt=%s error=%s", attempt, exc
+                    )
+                    if attempt < 3:
+                        await self.sleep(120)
+            return False
         finally:
             await page.close()
+
+    async def _response_confirmed(self, page: Any, url: str) -> bool:
+        try:
+            await page.goto(url.split("?")[0], wait_until="domcontentloaded", timeout=30_000)
+            await page.locator('[data-qa="vacancy-description"]').wait_for(
+                state="visible", timeout=20_000
+            )
+            response_control = page.locator(
+                'a[data-qa="vacancy-response-link-top"], '
+                'button[data-qa="vacancy-response-link-top"]'
+            ).first
+            return await response_control.count() == 0
+        except Exception as exc:
+            logger.warning("application_confirmation_failed error=%s", exc)
+            return False
 
     async def search_vacancies(
         self,
@@ -217,7 +247,13 @@ class HHClient:
                 if not await field.is_visible():
                     return PageState.PAGE_STRUCTURE_CHANGED
                 await field.fill(solution)
-                await field.press("Enter")
+                submit = page.locator(
+                    'button[type="submit"]:visible, button:has-text("Отправить"):visible'
+                ).first
+                if await submit.is_visible():
+                    await submit.click()
+                else:
+                    await field.press("Enter")
                 await self.sleep(1)
                 state = await classify_page(page)
                 if state is not PageState.CAPTCHA_DETECTED:
@@ -261,6 +297,9 @@ class HHClient:
                     raise RuntimeError("configured resume was not found")
                 await option.click()
 
+            if await page.locator('textarea[name^="task_"]').count() > 0:
+                raise RuntimeError("employer questionnaire requires a manual application")
+
             letter_toggle = (
                 page.locator('[data-qa*="letter-toggle"]')
                 .or_(page.get_by_text("Написать сопроводительное", exact=True))
@@ -269,7 +308,7 @@ class HHClient:
             )
             if await letter_toggle.is_visible():
                 await letter_toggle.click()
-            textarea = page.locator("textarea").first
+            textarea = page.locator('textarea:not([name^="task_"])').first
             await textarea.wait_for(state="visible", timeout=3_000)
             await textarea.fill(vacancy.cover_letter)
             await self._delay()
@@ -308,6 +347,8 @@ class HHClient:
                 .first
             )
             await success_marker.wait_for(state="visible", timeout=5_000)
+            if not await self._response_confirmed(page, vacancy.url):
+                raise RuntimeError("HH.ru did not confirm the application")
             if not self.database.complete_application(
                 permission.job_id,
                 permission.permit,
