@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import ipaddress
+import math
 import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Mapping
+from urllib.parse import urlparse
 
 import yaml
 from dotenv import dotenv_values
@@ -55,11 +58,27 @@ class Profile:
 
 
 @dataclass(frozen=True)
+class LLMSettings:
+    provider: str
+    model: str
+    timeout_seconds: int
+    max_retries: int
+    temperature: float
+    max_output_tokens: int
+    max_requests_per_day: int
+    ollama_url: str
+    mistral_api_key: str
+    mistral_base_url: str
+    openai_compatible_base_url: str
+    openai_compatible_api_key: str
+    openai_compatible_json_mode: bool
+
+
+@dataclass(frozen=True)
 class Settings:
     tg_bot_token: str
     tg_user_id: int
-    ollama_url: str
-    ollama_model: str
+    llm: LLMSettings
     app_mode: str
     enable_real_apply: bool
     browser_backend: str
@@ -76,6 +95,14 @@ class Settings:
     captcha_timeout_seconds: int
     captcha_max_attempts: int
     profile: Profile
+
+    @property
+    def ollama_url(self) -> str:
+        return self.llm.ollama_url
+
+    @property
+    def ollama_model(self) -> str:
+        return self.llm.model
 
 
 def _path(value: str) -> Path:
@@ -131,6 +158,50 @@ def load_settings(
             return 1
         return parsed
 
+    def non_negative_integer(key: str, default: str) -> int:
+        value = values.get(key, default).strip()
+        try:
+            parsed = int(value)
+        except ValueError:
+            errors.append(f"{key} must be an integer")
+            return 0
+        if parsed < 0:
+            errors.append(f"{key} must be zero or greater")
+            return 0
+        return parsed
+
+    def number(key: str, default: str) -> float:
+        value = values.get(key, default).strip()
+        try:
+            parsed = float(value)
+        except ValueError:
+            errors.append(f"{key} must be a number")
+            return 0.0
+        if not math.isfinite(parsed) or not 0 <= parsed <= 2:
+            errors.append(f"{key} must be between 0 and 2")
+            return 0.0
+        return parsed
+
+    def is_loopback(hostname: str | None) -> bool:
+        if not hostname:
+            return False
+        if hostname.lower() == "localhost":
+            return True
+        try:
+            return ipaddress.ip_address(hostname).is_loopback
+        except ValueError:
+            return False
+
+    def validate_endpoint(key: str, value: str, *, https_only: bool = False) -> None:
+        parsed = urlparse(value)
+        if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+            errors.append(f"{key} must be a valid HTTP(S) URL")
+            return
+        if https_only and parsed.scheme != "https":
+            errors.append(f"{key} must use HTTPS")
+        elif parsed.scheme == "http" and not is_loopback(parsed.hostname):
+            errors.append(f"{key} must use HTTPS for non-loopback hosts")
+
     app_mode = values.get("APP_MODE", "dry_run").strip().lower()
     if app_mode not in {"dry_run", "approval"}:
         errors.append("APP_MODE must be dry_run or approval")
@@ -138,6 +209,36 @@ def load_settings(
     browser_backend = values.get("BROWSER_BACKEND", "cloakbrowser").strip().lower()
     if browser_backend not in {"cloakbrowser", "playwright"}:
         errors.append("BROWSER_BACKEND must be cloakbrowser or playwright")
+
+    llm_provider = values.get("LLM_PROVIDER", "ollama").strip().lower()
+    if llm_provider not in {"ollama", "mistral", "openai_compatible"}:
+        errors.append("LLM_PROVIDER must be ollama, mistral or openai_compatible")
+    llm_model = values.get("LLM_MODEL", "").strip()
+    if not llm_model and llm_provider == "ollama":
+        llm_model = values.get("OLLAMA_MODEL", "llama3").strip()
+    if not llm_model:
+        errors.append("LLM_MODEL is required")
+    ollama_url = values.get(
+        "OLLAMA_URL", "http://localhost:11434/api/generate"
+    ).strip()
+    mistral_api_key = values.get("MISTRAL_API_KEY", "").strip()
+    mistral_base_url = values.get("MISTRAL_BASE_URL", "").strip()
+    compatible_base_url = values.get("OPENAI_COMPATIBLE_BASE_URL", "").strip()
+    compatible_api_key = values.get("OPENAI_COMPATIBLE_API_KEY", "").strip()
+    if llm_provider == "ollama":
+        validate_endpoint("OLLAMA_URL", ollama_url)
+    elif llm_provider == "mistral":
+        if not mistral_api_key:
+            errors.append("MISTRAL_API_KEY is required")
+        if mistral_base_url:
+            validate_endpoint("MISTRAL_BASE_URL", mistral_base_url, https_only=True)
+    elif llm_provider == "openai_compatible":
+        if not compatible_base_url:
+            errors.append("OPENAI_COMPATIBLE_BASE_URL is required")
+        else:
+            validate_endpoint("OPENAI_COMPATIBLE_BASE_URL", compatible_base_url)
+        if not compatible_api_key:
+            errors.append("OPENAI_COMPATIBLE_API_KEY is required")
 
     tg_user_id_text = required("TG_USER_ID")
     try:
@@ -222,8 +323,23 @@ def load_settings(
     settings = Settings(
         tg_bot_token=required("TG_BOT_TOKEN"),
         tg_user_id=tg_user_id,
-        ollama_url=values.get("OLLAMA_URL", "http://localhost:11434/api/generate").strip(),
-        ollama_model=values.get("OLLAMA_MODEL", "llama3").strip(),
+        llm=LLMSettings(
+            provider=llm_provider,
+            model=llm_model,
+            timeout_seconds=positive_integer("LLM_TIMEOUT_SECONDS", "30"),
+            max_retries=non_negative_integer("LLM_MAX_RETRIES", "1"),
+            temperature=number("LLM_TEMPERATURE", "0"),
+            max_output_tokens=positive_integer("LLM_MAX_OUTPUT_TOKENS", "1200"),
+            max_requests_per_day=positive_integer("LLM_MAX_REQUESTS_PER_DAY", "100"),
+            ollama_url=ollama_url,
+            mistral_api_key=mistral_api_key,
+            mistral_base_url=mistral_base_url,
+            openai_compatible_base_url=compatible_base_url,
+            openai_compatible_api_key=compatible_api_key,
+            openai_compatible_json_mode=boolean(
+                "OPENAI_COMPATIBLE_JSON_MODE", "true"
+            ),
+        ),
         app_mode=app_mode,
         enable_real_apply=boolean("ENABLE_REAL_APPLY", "false"),
         browser_backend=browser_backend,

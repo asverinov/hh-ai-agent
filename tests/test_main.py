@@ -5,10 +5,13 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
-from ai_analyzer import SuitabilityResult
+from ai_analyzer import SuitabilityResult, VacancyAnalyzer
 from config import load_settings
 from database import Database, VacancyStatus
 from hh_client import PageState, VacancyDetails, VacancySummary
+from llm.errors import LLMAuthenticationError
+from llm.managed import ManagedLLMProvider
+from llm.providers.fake import FakeProvider
 from main import process_vacancy
 from tests.test_config import VALID_ENV, write_profile
 
@@ -29,7 +32,9 @@ class FakeHHClient:
 
 class FakeAnalyzer:
     async def assess(self, title: str, description: str) -> SuitabilityResult:
-        return SuitabilityResult(True, 0.91, "Relevant work")
+        return SuitabilityResult(
+            suitable=True, confidence=0.91, reason="Relevant work"
+        )
 
     async def generate_cover_letter(self, title: str, description: str) -> str:
         return "Safe local-profile letter"
@@ -134,6 +139,41 @@ def test_browser_read_error_is_persisted_as_apply_failed(tmp_path: Path) -> None
     vacancy = database.get("job-1")
     assert vacancy.status is VacancyStatus.APPLY_FAILED
     assert "navigation failed" in vacancy.error_text
+
+
+def test_llm_failure_rejects_vacancy_without_requesting_approval(
+    tmp_path: Path,
+) -> None:
+    app_settings = settings(tmp_path, "approval")
+    database = Database(app_settings.database_path)
+    database.init()
+    provider = ManagedLLMProvider(
+        FakeProvider([LLMAuthenticationError()]),
+        database,
+        max_retries=1,
+        max_requests_per_day=100,
+    )
+    telegram = FakeTelegram()
+    details = VacancyDetails(
+        SUMMARY, PageState.VACANCY_LOADED, "Example", "Build Python services"
+    )
+
+    asyncio.run(
+        process_vacancy(
+            SUMMARY,
+            app_settings,
+            database,
+            FakeHHClient(details),
+            VacancyAnalyzer(app_settings, provider),
+            telegram,
+            now_factory=lambda: NOW,
+        )
+    )
+
+    vacancy = database.get("job-1")
+    assert vacancy.status is VacancyStatus.REJECTED_BY_LLM
+    assert vacancy.cover_letter == ""
+    assert telegram.previews == []
 
 
 def test_cli_reports_configuration_error_without_traceback(tmp_path: Path) -> None:

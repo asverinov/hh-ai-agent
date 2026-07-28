@@ -9,12 +9,16 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
-from ai_analyzer import OllamaAnalyzer
+from ai_analyzer import VacancyAnalyzer
 from approval import ApprovalGuard, ApprovalService
 from browser_backend import BrowserLaunchError, create_browser_backend
 from config import ConfigError, Settings, load_settings
 from database import Database, VacancyStatus
 from hh_client import HHClient, PageState, VacancySummary
+from llm.base import LLMProvider
+from llm.errors import LLMError
+from llm.factory import create_llm_provider
+from llm.types import LLMRequest
 from logging_setup import configure_logging
 from tg_bot import AgentControl, TelegramService
 from vacancy_filter import title_rejection_reason
@@ -28,7 +32,7 @@ async def process_vacancy(
     settings: Settings,
     database: Database,
     hh_client: HHClient,
-    analyzer: OllamaAnalyzer,
+    analyzer: VacancyAnalyzer,
     telegram: TelegramService,
     *,
     now_factory: Callable[[], datetime] | None = None,
@@ -129,7 +133,7 @@ async def agent_loop(
     settings: Settings,
     database: Database,
     hh_client: HHClient,
-    analyzer: OllamaAnalyzer,
+    analyzer: VacancyAnalyzer,
     telegram: TelegramService,
     control: AgentControl,
 ) -> None:
@@ -166,6 +170,7 @@ async def run(settings: Settings) -> None:
     database = Database(settings.database_path)
     database.init()
     backend = create_browser_backend(settings)
+    llm_provider = create_llm_provider(settings, database)
     telegram: TelegramService | None = None
     try:
         context = await backend.start()
@@ -180,22 +185,59 @@ async def run(settings: Settings) -> None:
         telegram = TelegramService(
             settings, database, approval_service, control
         )
-        analyzer = OllamaAnalyzer(settings)
+        analyzer = VacancyAnalyzer(settings, llm_provider)
         await asyncio.gather(
             telegram.start_polling(),
             agent_loop(settings, database, hh_client, analyzer, telegram, control),
         )
     finally:
-        if telegram is not None:
-            await telegram.stop()
-        await backend.close()
+        try:
+            if telegram is not None:
+                await telegram.stop()
+        finally:
+            try:
+                await llm_provider.close()
+            finally:
+                await backend.close()
 
 
-def cli(argv: list[str] | None = None) -> int:
+async def check_llm(
+    settings: Settings,
+    provider_factory: Callable[[Settings, Database], LLMProvider] = create_llm_provider,
+) -> None:
+    database = Database(settings.database_path)
+    database.init()
+    provider = provider_factory(settings, database)
+    try:
+        response = await provider.generate_text(
+            LLMRequest(
+                system_instructions="Return only the word OK.",
+                user_content="Reply OK.",
+                model=settings.llm.model,
+                temperature=0,
+                max_output_tokens=min(settings.llm.max_output_tokens, 8),
+                timeout_seconds=settings.llm.timeout_seconds,
+                operation="healthcheck",
+            )
+        )
+        print(
+            f"LLM check: provider={response.provider} model={response.model} "
+            f"latency_ms={response.latency_ms} success=true"
+        )
+    finally:
+        await provider.close()
+
+
+def cli(
+    argv: list[str] | None = None,
+    *,
+    provider_factory: Callable[[Settings, Database], LLMProvider] = create_llm_provider,
+) -> int:
     parser = argparse.ArgumentParser(description="Safe personal HH assistant")
     parser.add_argument("--env-file", type=Path, default=Path(".env"))
     parser.add_argument("--profile", type=Path)
     parser.add_argument("--check-config", action="store_true")
+    parser.add_argument("--check-llm", action="store_true")
     args = parser.parse_args(argv)
     try:
         settings = load_settings(args.env_file, args.profile)
@@ -207,6 +249,17 @@ def cli(argv: list[str] | None = None) -> int:
             f"Configuration valid: mode={settings.app_mode}, "
             f"browser={settings.browser_backend}"
         )
+        return 0
+    if args.check_llm:
+        try:
+            asyncio.run(check_llm(settings, provider_factory))
+        except LLMError as exc:
+            print(
+                f"LLM check failed: provider={settings.llm.provider} "
+                f"error_type={exc.category}",
+                file=sys.stderr,
+            )
+            return 1
         return 0
     configure_logging(settings.log_path)
     try:

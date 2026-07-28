@@ -63,8 +63,10 @@ python3 -m playwright install chromium
 - [ ] Для Playwright меняйте `BROWSER_BACKEND` вручную. Автоматического fallback
   нет.
 
-## Ollama
+## Выбор LLM
 
+- [ ] Выберите ровно один provider. Автоматического fallback между сервисами
+  нет.
 - [ ] Установите Ollama с официальной страницы для macOS.
 - [ ] Откройте приложение Ollama.
 - [ ] Загрузите модель из `.env.example`:
@@ -78,6 +80,35 @@ ollama pull llama3
 ```bash
 curl http://localhost:11434/api/tags
 ```
+
+- [ ] Для Ollama оставьте:
+
+```ini
+LLM_PROVIDER=ollama
+LLM_MODEL=llama3
+OLLAMA_URL=http://localhost:11434/api/generate
+```
+
+- [ ] Либо для Mistral создайте отдельный API key и задайте:
+
+```ini
+LLM_PROVIDER=mistral
+LLM_MODEL=mistral-small-latest
+MISTRAL_API_KEY=replace_me
+```
+
+- [ ] Либо для проверенного вами `/chat/completions` endpoint задайте:
+
+```ini
+LLM_PROVIDER=openai_compatible
+LLM_MODEL=your-model
+OPENAI_COMPATIBLE_BASE_URL=https://provider.example/v1
+OPENAI_COMPATIBLE_API_KEY=replace_me
+OPENAI_COMPATIBLE_JSON_MODE=true
+```
+
+- [ ] Помните: Mistral и удалённый custom API получают минимальный профиль и
+  текст вакансии. Не выбирайте их, если это неприемлемо.
 
 ## Telegram
 
@@ -100,8 +131,10 @@ cp profile.example.yaml profile.yaml
 
   - `TG_BOT_TOKEN`;
   - `TG_USER_ID`;
-  - `OLLAMA_URL`;
-  - `OLLAMA_MODEL`;
+  - `LLM_PROVIDER`;
+  - `LLM_MODEL`;
+  - URL/key только выбранного provider-а;
+  - `LLM_MAX_REQUESTS_PER_DAY`;
   - при необходимости интервалы и лимиты.
 
 - [ ] Для первого запуска оставьте:
@@ -141,6 +174,16 @@ git check-ignore .env profile.yaml .browser-profile state.json agent.db
 ```bash
 python3 main.py --check-config
 ```
+
+- [ ] Выполните один минимальный запрос к выбранному LLM. Он не запускает
+  браузер/Telegram, но учитывается в дневной SQLite-квоте:
+
+```bash
+python3 main.py --check-llm
+```
+
+- [ ] Убедитесь, что строка содержит ожидаемые `provider`, `model` и
+  `success=true`, но не API key.
 
 - [ ] Запустите unit-тесты:
 

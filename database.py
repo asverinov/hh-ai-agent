@@ -153,6 +153,30 @@ class Database:
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS vacancies_applied_at_idx ON vacancies(applied_at)"
             )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS llm_requests (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    provider TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    operation TEXT NOT NULL,
+                    started_at TEXT NOT NULL,
+                    finished_at TEXT,
+                    success INTEGER CHECK (success IN (0, 1)),
+                    input_tokens INTEGER,
+                    output_tokens INTEGER,
+                    latency_ms INTEGER,
+                    provider_request_id TEXT,
+                    error_type TEXT NOT NULL DEFAULT ''
+                )
+                """
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS llm_requests_started_at_idx ON llm_requests(started_at)"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS llm_requests_provider_idx ON llm_requests(provider)"
+            )
             columns = {
                 row[1] for row in connection.execute("PRAGMA table_info(vacancies)")
             }
@@ -555,6 +579,92 @@ class Database:
     def applied_today(self, now: datetime) -> int:
         with self._connect() as connection:
             return self._applied_today(connection, now)
+
+    def reserve_llm_request(
+        self,
+        *,
+        provider: str,
+        model: str,
+        operation: str,
+        now: datetime,
+        daily_limit: int,
+    ) -> int | None:
+        start, end = self._day_bounds(now)
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            count = connection.execute(
+                "SELECT COUNT(*) FROM llm_requests WHERE started_at >= ? AND started_at < ?",
+                (start, end),
+            ).fetchone()[0]
+            if count >= daily_limit:
+                return None
+            cursor = connection.execute(
+                """
+                INSERT INTO llm_requests (provider, model, operation, started_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (provider, model, operation, _iso(now)),
+            )
+            return int(cursor.lastrowid)
+
+    def complete_llm_request(
+        self,
+        request_row_id: int,
+        *,
+        success: bool,
+        finished_at: datetime,
+        input_tokens: int | None = None,
+        output_tokens: int | None = None,
+        latency_ms: int | None = None,
+        provider_request_id: str | None = None,
+        error_type: str = "",
+    ) -> bool:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE llm_requests SET
+                    finished_at = ?, success = ?, input_tokens = ?,
+                    output_tokens = ?, latency_ms = ?, provider_request_id = ?,
+                    error_type = ?
+                WHERE id = ? AND success IS NULL
+                """,
+                (
+                    _iso(finished_at),
+                    int(success),
+                    input_tokens,
+                    output_tokens,
+                    latency_ms,
+                    provider_request_id,
+                    error_type,
+                    request_row_id,
+                ),
+            )
+            return cursor.rowcount == 1
+
+    def llm_requests_today(self, now: datetime) -> int:
+        start, end = self._day_bounds(now)
+        with self._connect() as connection:
+            return int(
+                connection.execute(
+                    "SELECT COUNT(*) FROM llm_requests WHERE started_at >= ? AND started_at < ?",
+                    (start, end),
+                ).fetchone()[0]
+            )
+
+    def llm_usage_stats(self) -> dict[str, int]:
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT
+                    COUNT(*) AS total_requests,
+                    COALESCE(SUM(success = 1), 0) AS successful_requests,
+                    COALESCE(SUM(success = 0), 0) AS failed_requests,
+                    COALESCE(SUM(input_tokens), 0) AS input_tokens,
+                    COALESCE(SUM(output_tokens), 0) AS output_tokens
+                FROM llm_requests
+                """
+            ).fetchone()
+            return {key: int(row[key]) for key in row.keys()}
 
     def expire_pending(self, now: datetime) -> int:
         with self._connect() as connection:

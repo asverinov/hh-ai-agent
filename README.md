@@ -2,9 +2,10 @@
 
 ## 1. Назначение проекта
 
-Проект ищет вакансии на HH.ru, фильтрует их, просит локальную Ollama оценить
-соответствие профилю, генерирует сопроводительное письмо и отправляет превью в
-Telegram.
+Проект ищет вакансии на HH.ru, фильтрует их, просит выбранный LLM provider
+оценить соответствие профилю, генерирует сопроводительное письмо и отправляет
+превью в Telegram. Поддерживаются локальная Ollama, официальный Mistral API и
+ограниченный OpenAI-compatible `/chat/completions` endpoint.
 
 По умолчанию используется `APP_MODE=dry_run`: финальная кнопка отклика
 технически недоступна. Реальный отклик возможен только при одновременном
@@ -24,8 +25,9 @@ Telegram.
 | `config.py` | Проверка `.env` и локального `profile.yaml` |
 | `browser_backend.py` | Экспериментальный CloakBrowser или резервный Playwright |
 | `hh_client.py` | Поиск, чтение страниц, сообщения HH и физическая отправка |
-| `ai_analyzer.py` | Строгий JSON-анализ и письмо только из локального профиля |
-| `database.py` | SQLite-статусы, TTL, лимиты и атомарные переходы |
+| `llm/` | Единый контракт, Ollama/Mistral/OpenAI-compatible adapters, retry и usage |
+| `ai_analyzer.py` | Provider-neutral prompts, Pydantic-анализ и проверка письма |
+| `database.py` | SQLite-статусы, TTL, application/LLM-лимиты и атомарные переходы |
 | `approval.py` | Единственный разрешённый инициатор реального отклика |
 | `tg_bot.py` | Команды, превью и индивидуальные inline-кнопки |
 | `main.py` | Безопасная координация цикла |
@@ -44,11 +46,18 @@ Browser adapter не знает о подтверждениях. `CloakBrowserBa
 persistent profile; `PlaywrightBrowserBackend` оставлен как явно выбираемый
 резерв. Автоматического переключения между ними нет.
 
+`VacancyAnalyzer` не знает URL или ключей provider-а. Единственная фабрика в
+`llm/factory.py` создаёт ровно один adapter. Общий managed-слой выполняет
+ограниченные retry, локальную Pydantic-проверку, SQLite-квоту и сохраняет только
+metadata usage. Автоматического LLM fallback нет: ошибка одного provider-а не
+передаёт профиль другому сервису.
+
 ## 3. Установка на macOS ARM64
 
-Поддерживаемая база — Python 3.13. На тестовой машине macOS ARM64 полный набор
-закреплённых зависимостей также установился и импортировался с Python 3.14.5, но
-PyPI-классификаторы CloakBrowser 0.5.2 пока перечисляют версии только до 3.13.
+Поддерживаемая база — Python 3.13.14. На macOS ARM64 полный набор закреплённых
+зависимостей и полный unit-test suite проверены также с Python 3.14.5. Для наиболее
+предсказуемой установки используйте 3.13, поскольку метаданные CloakBrowser
+0.5.2 пока не заявляют Python 3.14.
 
 ```bash
 brew install python@3.13
@@ -85,29 +94,91 @@ python3 -m scripts.browser_smoke --backend cloakbrowser --no-headless --profile-
 Ожидаются `status=200` и `title=Example Domain`. Smoke-test ручной и не входит в
 `pytest`.
 
-## 4. Настройка Ollama
+## 4. Настройка LLM provider
+
+Общие настройки в `.env`:
+
+```ini
+LLM_PROVIDER=ollama
+LLM_MODEL=llama3
+LLM_TIMEOUT_SECONDS=30
+LLM_MAX_RETRIES=1
+LLM_TEMPERATURE=0
+LLM_MAX_OUTPUT_TOKENS=1200
+LLM_MAX_REQUESTS_PER_DAY=100
+```
+
+### Ollama
 
 Установите официальное приложение Ollama для macOS, запустите его и загрузите
-модель, совпадающую с `OLLAMA_MODEL`:
+модель, совпадающую с `LLM_MODEL`:
 
 ```bash
 ollama pull llama3
 ```
 
-Если приложение не запустило локальный сервер автоматически:
+Если приложение не запустило локальный сервер автоматически, выполните
+`ollama serve`. Конфигурация:
 
-```bash
-ollama serve
+```ini
+LLM_PROVIDER=ollama
+LLM_MODEL=llama3
+OLLAMA_URL=http://localhost:11434/api/generate
 ```
 
-Проверка API:
-
-```bash
-curl http://localhost:11434/api/tags
-```
-
-Официальные инструкции: [Ollama for macOS](https://docs.ollama.com/macos) и
+Проверка локального API: `curl http://localhost:11434/api/tags`. Официальные
+инструкции: [Ollama for macOS](https://docs.ollama.com/macos) и
 [CLI reference](https://docs.ollama.com/cli).
+
+### Mistral
+
+Используется официальный SDK `mistralai==2.7.0`. Создайте отдельный API key в
+Mistral, храните его только в `.env` и выберите доступную вашему аккаунту модель:
+
+```ini
+LLM_PROVIDER=mistral
+LLM_MODEL=mistral-small-latest
+MISTRAL_API_KEY=replace_me
+MISTRAL_BASE_URL=
+```
+
+Пустой `MISTRAL_BASE_URL` использует официальный endpoint SDK. Нестандартный URL
+разрешён только по HTTPS. При Mistral локальный профиль и текст вакансии уходят
+во внешний API; оцените это до включения.
+
+### OpenAI-compatible custom API
+
+Adapter поддерживает только `<base>/chat/completions`, строковый
+`message.content` и необязательный `json_object` mode:
+
+```ini
+LLM_PROVIDER=openai_compatible
+LLM_MODEL=your-model
+OPENAI_COMPATIBLE_BASE_URL=https://provider.example/v1
+OPENAI_COMPATIBLE_API_KEY=replace_me
+OPENAI_COMPATIBLE_JSON_MODE=true
+```
+
+Это не обещание совместимости с OpenAI Responses API, Anthropic Messages API
+или любым сервером, называющим себя OpenAI-compatible. Удалённый URL обязан быть
+HTTPS; HTTP допускается только для loopback `localhost`, `127.0.0.1` или `::1`.
+
+После `--check-config` можно выполнить один безопасный минимальный LLM-запрос:
+
+```bash
+python3 main.py --check-llm
+```
+
+Команда выводит provider, model, latency и success, не запускает HH.ru, браузер
+или Telegram. Она всё же обращается к выбранному LLM и расходует одну
+SQLite-квоту. Эквивалентный ручной smoke с явным provider-ом:
+
+```bash
+python3 -m scripts.llm_smoke --provider mistral
+```
+
+Без обязательного ключа команда завершается понятной configuration error.
+Реальные Mistral/custom smoke-запросы при разработке проекта не выполнялись.
 
 ## 5. Создание Telegram-бота
 
@@ -194,9 +265,9 @@ python3 main.py --check-config
 python3 main.py
 ```
 
-Бот ищет, читает, фильтрует, вызывает Ollama, сохраняет результаты и отправляет
-Telegram-превью без кнопок реального действия. Даже сформированный вручную
-прямой вызов sender будет отклонён approval guard.
+Бот ищет, читает, фильтрует, вызывает выбранный LLM provider, сохраняет
+результаты и отправляет Telegram-превью без кнопок реального действия. Даже
+сформированный вручную прямой вызов sender будет отклонён approval guard.
 
 ## 9. Режим подтверждения
 
@@ -284,8 +355,10 @@ mv .browser-profile .browser-profile.backup
   `python3 -m cloakbrowser info`; для резервного backend явно установите
   `BROWSER_BACKEND=playwright` и Chromium.
 - `HH.ru login is required` — включите headed mode и войдите вручную.
-- `Invalid model response` — проверьте модель и Ollama; вакансия безопасно
-  отклоняется, а не считается подходящей.
+- `Invalid model response` — проверьте выбранный provider и модель; вакансия
+  безопасно отклоняется, а не считается подходящей.
+- `LLM check failed` — проверьте endpoint, ключ, модель и дневную LLM-квоту по
+  `error_type`; prompt и полный ответ намеренно не логируются.
 - `page_structure_changed` — изменились селекторы HH; вакансия помечается
   ошибкой, цикл продолжает работу.
 - `captcha_detected` — решите CAPTCHA вручную до тайм-аута или отмените; число
@@ -311,18 +384,32 @@ mv .browser-profile .browser-profile.backup
 - Редактирование письма в Telegram пока не реализовано.
 - После process crash статус `applying` намеренно остаётся fail-closed.
 - Сервис рассчитан на одного владельца и одну локальную SQLite-базу.
+- Каждый фактический LLM-вызов, включая retry и незавершённую попытку после
+  crash, атомарно занимает строку `llm_requests`. Лимит считается по SQLite за
+  локальный календарный день и переживает перезапуск. Денежная оценка не
+  вычисляется: цены моделей меняются.
+- Prompt ограничивает модель фактами профиля, а письмо отбрасывается при
+  служебном префиксе, Markdown fence, повторе известных injection-команд или
+  неизвестной ссылке. Полностью доказать отсутствие смысловой галлюцинации
+  автоматически невозможно — письмо всегда нужно прочитать в Telegram.
 - Пользователь или локальный процесс с правом записи в SQLite может изменить её
   состояние; модель угроз защищает от случайного submit, а не от скомпрометированной
   машины.
 
 ## Разработка
 
-Unit-тесты не обращаются к HH.ru, Telegram или Ollama:
+Unit-тесты не обращаются к HH.ru, Telegram или внешним LLM API:
 
 ```bash
 python3 -m compileall .
 pytest -q
 ```
+
+Чтобы добавить новый API, реализуйте `ProviderAdapter.complete()` и `close()`,
+нормализуйте ошибки без response body/ключа, зарегистрируйте adapter только в
+`llm/factory.py` и покройте payload, schema, retry и fake-тестами. OpenAI
+Responses и Anthropic Messages требуют отдельных adapters; production-заглушек
+для них нет.
 
 Пошаговая установка для начинающего пользователя находится в
 [`SETUP_CHECKLIST.md`](SETUP_CHECKLIST.md).
