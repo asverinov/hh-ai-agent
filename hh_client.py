@@ -309,7 +309,7 @@ class HHClient:
             if await letter_toggle.is_visible():
                 await letter_toggle.click()
             textarea = page.locator('textarea:not([name^="task_"])').first
-            await textarea.wait_for(state="visible", timeout=3_000)
+            await textarea.wait_for(state="visible", timeout=10_000)
             await textarea.fill(vacancy.cover_letter)
             await self._delay()
 

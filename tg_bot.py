@@ -119,14 +119,23 @@ class TelegramService:
             return
         action, job_id = (callback.data or "").split(":", 1)
         if action == "apply":
+            # Отвечаем на callback немедленно — Telegram требует ответ в течение ~10 сек,
+            # а браузерный отклик может занять значительно больше времени.
+            await callback.answer("⏳ Отправляем отклик...", show_alert=False)
             result = await self.approval_service.approve_and_apply(
                 job_id, callback.from_user.id
             )
+            # Результат присылаем отдельным сообщением, т.к. callback уже закрыт.
+            status = "✓ Отклик отправлен" if result.ok else f"✗ {result.message}"
+            await self.notify(status)
+            if result.ok and callback.message:
+                await callback.message.edit_reply_markup(reply_markup=None)
         else:
+            # skip выполняется быстро — можно отвечать обычным способом.
             result = self.approval_service.skip(job_id, callback.from_user.id)
-        await callback.answer(result.message, show_alert=not result.ok)
-        if result.ok and callback.message:
-            await callback.message.edit_reply_markup(reply_markup=None)
+            await callback.answer(result.message, show_alert=not result.ok)
+            if result.ok and callback.message:
+                await callback.message.edit_reply_markup(reply_markup=None)
 
     async def _text_handler(self, message: Message) -> None:
         if not self.authorized(message.from_user.id):
