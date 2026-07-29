@@ -14,6 +14,7 @@ class VacancyStatus(str, Enum):
     DISCOVERED = "discovered"
     REJECTED_BY_FILTER = "rejected_by_filter"
     REJECTED_BY_LLM = "rejected_by_llm"
+    ANALYSIS_FAILED = "analysis_failed"  # LLM timeout / invalid_response при анализе
     PENDING_APPROVAL = "pending_approval"
     APPROVED = "approved"
     APPLYING = "applying"
@@ -58,6 +59,7 @@ ALLOWED_TRANSITIONS = {
     VacancyStatus.DISCOVERED: {
         VacancyStatus.REJECTED_BY_FILTER,
         VacancyStatus.REJECTED_BY_LLM,
+        VacancyStatus.ANALYSIS_FAILED,
         VacancyStatus.PENDING_APPROVAL,
         VacancyStatus.APPLY_FAILED,
     },
@@ -183,8 +185,76 @@ class Database:
             for name in ("applying_at", "submit_attempted_at"):
                 if name not in columns:
                     connection.execute(f"ALTER TABLE vacancies ADD COLUMN {name} TEXT")
+            self._migrate_status_check(connection)
+
+    def _migrate_status_check(self, connection: sqlite3.Connection) -> None:
+        """Пересоздать таблицу vacancies если CHECK-ограничение не включает новые статусы.
+
+        SQLite не позволяет изменить CHECK-ограничение через ALTER TABLE —
+        поэтому при появлении новых значений VacancyStatus нужна полная пересборка таблицы.
+        """
+        row = connection.execute(
+            "SELECT sql FROM sqlite_master WHERE type='table' AND name='vacancies'"
+        ).fetchone()
+        if row is None:
+            return
+        table_sql: str = row["sql"] or ""
+        missing = [s.value for s in VacancyStatus if f"'{s.value}'" not in table_sql]
+        if not missing:
+            return
+        import logging as _logging
+        _logging.getLogger(__name__).info(
+            "db_migrate_status_check missing=%s", missing
+        )
+        statuses = ", ".join(f"'{s.value}'" for s in VacancyStatus)
+        connection.execute("ALTER TABLE vacancies RENAME TO _vacancies_old")
+        connection.execute(
+            f"""
+            CREATE TABLE vacancies (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                company TEXT NOT NULL DEFAULT '',
+                url TEXT NOT NULL,
+                description_hash TEXT NOT NULL DEFAULT '',
+                search_query TEXT NOT NULL DEFAULT '',
+                llm_decision INTEGER,
+                llm_reason TEXT NOT NULL DEFAULT '',
+                confidence REAL,
+                cover_letter TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL CHECK (status IN ({statuses})),
+                discovered_at TEXT NOT NULL,
+                approval_requested_at TEXT,
+                approval_expires_at TEXT,
+                approved_at TEXT,
+                applying_at TEXT,
+                submit_attempted_at TEXT,
+                applied_at TEXT,
+                approver_id INTEGER,
+                permit_hash TEXT,
+                error_text TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        connection.execute("INSERT INTO vacancies SELECT * FROM _vacancies_old")
+        connection.execute("DROP TABLE _vacancies_old")
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS vacancies_status_idx ON vacancies(status)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS vacancies_applied_at_idx ON vacancies(applied_at)"
+        )
+
+    def update_cover_letter(self, job_id: str, cover_letter: str) -> bool:
+        """Обновить сопроводительное письмо для вакансии в статусе pending_approval."""
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "UPDATE vacancies SET cover_letter = ? WHERE id = ? AND status = ?",
+                (cover_letter, job_id, VacancyStatus.PENDING_APPROVAL.value),
+            )
+            return cursor.rowcount == 1
 
     @staticmethod
+
     def _vacancy(row: sqlite3.Row | None) -> Vacancy | None:
         if row is None:
             return None

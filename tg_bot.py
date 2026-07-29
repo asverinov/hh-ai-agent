@@ -54,6 +54,8 @@ class TelegramService:
         self.dispatcher = dispatcher or Dispatcher()
         self.now_factory = now_factory or (lambda: datetime.now().astimezone())
         self._captcha_future: asyncio.Future[str | None] | None = None
+        self._edit_job_id: str | None = None
+        self._edit_future: asyncio.Future[str | None] | None = None
         self._register_handlers()
 
     def authorized(self, user_id: int) -> bool:
@@ -98,14 +100,17 @@ class TelegramService:
         if name == "cancel":
             if self._captcha_future and not self._captcha_future.done():
                 self._captcha_future.set_result(None)
-            return "Current CAPTCHA request cancelled."
+            if self._edit_future and not self._edit_future.done():
+                self._edit_future.set_result(None)
+            return "Current input request cancelled."
         return "Unknown command."
 
     def _register_handlers(self) -> None:
         for name in ("start", "status", "pause", "resume", "pending", "stats", "cancel"):
             self.dispatcher.message.register(self._command_handler, Command(name))
         self.dispatcher.callback_query.register(
-            self._callback_handler, F.data.startswith("apply:") | F.data.startswith("skip:")
+            self._callback_handler,
+            F.data.startswith("apply:") | F.data.startswith("skip:") | F.data.startswith("edit:"),
         )
         self.dispatcher.message.register(self._text_handler)
 
@@ -125,11 +130,38 @@ class TelegramService:
             result = await self.approval_service.approve_and_apply(
                 job_id, callback.from_user.id
             )
-            # Результат присылаем отдельным сообщением, т.к. callback уже закрыт.
-            status = "✓ Отклик отправлен" if result.ok else f"✗ {result.message}"
-            await self.notify(status)
-            if result.ok and callback.message:
-                await callback.message.edit_reply_markup(reply_markup=None)
+            vacancy = self.database.get(job_id)
+            if result.ok:
+                await self.notify("✓ Отклик отправлен")
+                if callback.message:
+                    await callback.message.edit_reply_markup(reply_markup=None)
+            else:
+                if vacancy and vacancy.error_text == "questionnaire_required":
+                    await self.notify_questionnaire_required(vacancy.title, vacancy.url)
+                    if callback.message:
+                        await callback.message.edit_reply_markup(reply_markup=None)
+                else:
+                    await self.notify(f"✗ {result.message}")
+        elif action == "edit":
+            await callback.answer("Пришлите новый текст сопроводительного письма сообщением (или /cancel):", show_alert=True)
+            loop = asyncio.get_running_loop()
+            self._edit_job_id = job_id
+            self._edit_future = loop.create_future()
+            try:
+                new_letter = await asyncio.wait_for(self._edit_future, timeout=300)
+                if new_letter:
+                    self.database.update_cover_letter(job_id, new_letter)
+                    await self.notify("✓ Сопроводительное письмо обновлено!")
+                    updated_vacancy = self.database.get(job_id)
+                    if updated_vacancy:
+                        await self.send_preview(updated_vacancy, include_actions=True)
+                else:
+                    await self.notify("Редактирование письма отменено.")
+            except TimeoutError:
+                await self.notify("Время ожидания редактирования письма истекло.")
+            finally:
+                self._edit_job_id = None
+                self._edit_future = None
         else:
             # skip выполняется быстро — можно отвечать обычным способом.
             result = self.approval_service.skip(job_id, callback.from_user.id)
@@ -144,6 +176,10 @@ class TelegramService:
         if self._captcha_future and not self._captcha_future.done() and message.text:
             self._captcha_future.set_result(message.text.strip())
             await message.answer("CAPTCHA input received.")
+            return
+        if self._edit_future and not self._edit_future.done() and message.text:
+            self._edit_future.set_result(message.text.strip())
+            return
 
     async def send_preview(self, vacancy: Vacancy, include_actions: bool) -> None:
         keyboard = None
@@ -157,7 +193,12 @@ class TelegramService:
                         InlineKeyboardButton(
                             text="Пропустить", callback_data=f"skip:{vacancy.id}"
                         ),
-                    ]
+                    ],
+                    [
+                        InlineKeyboardButton(
+                            text="✏️ Изменить письмо", callback_data=f"edit:{vacancy.id}"
+                        ),
+                    ],
                 ]
             )
         confidence = "n/a" if vacancy.confidence is None else f"{vacancy.confidence:.0%}"
@@ -184,6 +225,34 @@ class TelegramService:
 
     async def notify(self, text: str) -> None:
         await self.bot.send_message(chat_id=self.settings.tg_user_id, text=text)
+
+    async def notify_analysis_failed(self, title: str, url: str, error_type: str) -> None:
+        text = (
+            f"⚠️ <b>Ошибка AI-анализа вакансии</b>\n"
+            f"<b>{html.escape(title)}</b>\n"
+            f"<a href=\"{html.escape(url, quote=True)}\">Открыть вакансию</a>\n\n"
+            f"Причина: <code>{html.escape(error_type)}</code>"
+        )
+        await self.bot.send_message(
+            chat_id=self.settings.tg_user_id,
+            text=text,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
+
+    async def notify_questionnaire_required(self, title: str, url: str) -> None:
+        text = (
+            f"📋 <b>Требуется ручной отклик (тестовое / анкета)</b>\n"
+            f"<b>{html.escape(title)}</b>\n"
+            f"<a href=\"{html.escape(url, quote=True)}\">Открыть вакансию на HH.ru</a>\n\n"
+            f"Работодатель требует заполнении анкеты или выполнение тестового задания."
+        )
+        await self.bot.send_message(
+            chat_id=self.settings.tg_user_id,
+            text=text,
+            parse_mode="HTML",
+            disable_web_page_preview=True,
+        )
 
     async def request_captcha(
         self, screenshot: Path, title: str, timeout_seconds: int

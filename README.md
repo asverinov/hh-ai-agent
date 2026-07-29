@@ -155,4 +155,4 @@ pytest -q
 
 ## Контакты
 
-Вопросы и предложения: **[fikstt2](https://github.com/fikstt2)**
+Вопросы и предложения: **[@fikstt3](telegram)**

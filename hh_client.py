@@ -21,6 +21,11 @@ from database import Database
 logger = logging.getLogger(__name__)
 
 
+class QuestionnaireRequiredError(RuntimeError):
+    """Employer questionnaire or test assignment required."""
+    pass
+
+
 class PageState(str, Enum):
     VACANCY_LOADED = "vacancy_loaded"
     CAPTCHA_DETECTED = "captcha_detected"
@@ -298,7 +303,7 @@ class HHClient:
                 await option.click()
 
             if await page.locator('textarea[name^="task_"]').count() > 0:
-                raise RuntimeError("employer questionnaire requires a manual application")
+                raise QuestionnaireRequiredError("questionnaire_required")
 
             letter_toggle = (
                 page.locator('[data-qa*="letter-toggle"]')

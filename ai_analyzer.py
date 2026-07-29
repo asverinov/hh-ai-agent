@@ -32,6 +32,12 @@ class SuitabilityResult(BaseModel):
         return value
 
 
+class AnalysisError(Exception):
+    def __init__(self, error_type: str):
+        super().__init__(f"LLM analysis failed: {error_type}")
+        self.error_type = error_type
+
+
 class VacancyAnalyzer:
     _INJECTION_PHRASES = (
         "ignore all previous instructions.",
@@ -110,11 +116,7 @@ class VacancyAnalyzer:
                 self._provider_name(),
                 exc.category,
             )
-            return SuitabilityResult(
-                suitable=False,
-                confidence=0.0,
-                reason="Invalid model response",
-            )
+            raise AnalysisError(exc.category) from exc
 
     async def generate_cover_letter(
         self, vacancy_title: str, vacancy_description: str

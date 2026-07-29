@@ -9,7 +9,7 @@ from collections.abc import Callable
 from datetime import UTC, datetime
 from pathlib import Path
 
-from ai_analyzer import VacancyAnalyzer
+from ai_analyzer import AnalysisError, VacancyAnalyzer
 from approval import ApprovalGuard, ApprovalService
 from browser_backend import BrowserLaunchError, create_browser_backend
 from config import ConfigError, Settings, load_settings
@@ -83,7 +83,19 @@ async def process_vacancy(
         logger.info("vacancy_rejected job_id=%s source=filter", summary.id)
         return
 
-    suitability = await analyzer.assess(summary.title, details.description)
+    try:
+        suitability = await analyzer.assess(summary.title, details.description)
+    except AnalysisError as exc:
+        database.transition(
+            summary.id,
+            VacancyStatus.DISCOVERED,
+            VacancyStatus.ANALYSIS_FAILED,
+            error_text=exc.error_type,
+        )
+        await telegram.notify_analysis_failed(summary.title, summary.url, exc.error_type)
+        logger.warning("vacancy_analysis_failed job_id=%s error_type=%s", summary.id, exc.error_type)
+        return
+
     if not suitability.suitable:
         database.transition(
             summary.id,
@@ -102,8 +114,9 @@ async def process_vacancy(
             summary.id,
             VacancyStatus.DISCOVERED,
             VacancyStatus.APPLY_FAILED,
-            error_text="cover letter generation failed",
+            error_text="cover_letter_failed",
         )
+        await telegram.notify_analysis_failed(summary.title, summary.url, "cover_letter_failed")
         return
 
     if settings.app_mode == "dry_run":
