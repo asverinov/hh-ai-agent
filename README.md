@@ -1,415 +1,158 @@
-# Безопасный персональный HH Assistant
+# HH AI Agent
 
-## 1. Назначение проекта
+Агент автоматически ищет вакансии на HH.ru, оценивает их через LLM, генерирует сопроводительные письма и присылает подходящие в Telegram.
 
-Проект ищет вакансии на HH.ru, фильтрует их, просит выбранный LLM provider
-оценить соответствие профилю, генерирует сопроводительное письмо и отправляет
-превью в Telegram. Поддерживаются локальная Ollama, официальный Mistral API и
-ограниченный OpenAI-compatible `/chat/completions` endpoint.
+## Быстрый старт
 
-По умолчанию используется `APP_MODE=dry_run`: финальная кнопка отклика
-технически недоступна. Реальный отклик возможен только при одновременном
-выполнении трёх условий:
+Запусти мастер настройки — он проведёт тебя через все шаги:
 
-1. `APP_MODE=approval`;
-2. `ENABLE_REAL_APPLY=true`;
-3. владелец с ID `TG_USER_ID` нажал `Откликнуться` именно у этой вакансии, пока
-   30-минутное подтверждение не устарело.
+```bash
+python setup_wizard.py
+```
 
-Массового автоматического режима нет.
+Wizard спросит:
+1. Токен Telegram-бота и твой User ID
+2. Какой AI-провайдер использовать (Ollama локально, Mistral API или любой OpenAI-compatible)
+3. Данные твоего профиля для анализа вакансий
+4. Режим работы
 
-## 2. Архитектура
+После этого создаст `.env` и `profile.yaml`, проверит конфигурацию и покажет что делать дальше.
 
-| Компонент | Ответственность |
-| --- | --- |
-| `config.py` | Проверка `.env` и локального `profile.yaml` |
-| `browser_backend.py` | Экспериментальный CloakBrowser или резервный Playwright |
-| `hh_client.py` | Поиск, чтение страниц, сообщения HH и физическая отправка |
-| `llm/` | Единый контракт, Ollama/Mistral/OpenAI-compatible adapters, retry и usage |
-| `ai_analyzer.py` | Provider-neutral prompts, Pydantic-анализ и проверка письма |
-| `database.py` | SQLite-статусы, TTL, application/LLM-лимиты и атомарные переходы |
+**Изменить настройки позже:**
+
+```bash
+python setup_wizard.py --edit
+```
+
+---
+
+## Требования
+
+- Python 3.11+
+- Telegram Bot (создаётся через [@BotFather](https://t.me/BotFather))
+- Один из LLM-провайдеров (подробнее ниже)
+- [CloakBrowser](https://cloakbrowser.com/) (устанавливается автоматически через wizard)
+
+---
+
+## Режимы работы
+
+| Режим | Описание |
+|---|---|
+| `dry_run` | Ищет и анализирует вакансии, присылает превью в Telegram — **без реальных откликов** |
+| `approval` | Присылает вакансию с кнопкой «Откликнуться» — отклик только после твоего нажатия |
+
+Начинай с `dry_run`. Переходи на `approval` после того как убедишься что всё работает.
+
+---
+
+## LLM-провайдеры
+
+### Ollama (рекомендуется — локально, бесплатно)
+
+1. Установи [Ollama](https://ollama.com/download)
+2. Загрузи модель:
+   ```bash
+   ollama pull llama3
+   ```
+3. В wizard выбери **Ollama**
+
+### Mistral API (облачный)
+
+1. Зарегистрируйся на [console.mistral.ai](https://console.mistral.ai/)
+2. Создай API ключ
+3. В wizard выбери **Mistral API** и введи ключ
+
+> ⚠️ При Mistral текст вакансий и твой профиль уходят во внешний API.
+
+### OpenAI-compatible (любой совместимый)
+
+Поддерживается любой сервис с эндпоинтом `/chat/completions` (LocalAI, LM Studio, Groq и т.п.).
+В wizard выбери **OpenAI-compatible** и укажи URL + ключ.
+
+---
+
+## Telegram-команды
+
+| Команда | Описание |
+|---|---|
+| `/start` | Краткая справка |
+| `/status` | Режим, состояние, статистика |
+| `/pause` | Приостановить поиск |
+| `/resume` | Возобновить поиск |
+| `/pending` | Вакансии, ожидающие решения |
+| `/stats` | Статистика по статусам |
+| `/cancel` | Отменить ввод CAPTCHA |
+
+---
+
+## Архитектура
+
+| Файл | Ответственность |
+|---|---|
+| `config.py` | Валидация `.env` и `profile.yaml` |
+| `browser_backend.py` | CloakBrowser / Playwright адаптер |
+| `hh_client.py` | Поиск, чтение страниц, отправка откликов |
+| `llm/` | Ollama / Mistral / OpenAI-compatible адаптеры, retry, квота |
+| `ai_analyzer.py` | Анализ вакансий, генерация писем |
+| `database.py` | SQLite-состояние, лимиты, переходы статусов |
 | `approval.py` | Единственный разрешённый инициатор реального отклика |
-| `tg_bot.py` | Команды, превью и индивидуальные inline-кнопки |
-| `main.py` | Безопасная координация цикла |
+| `tg_bot.py` | Telegram-команды, превью, inline-кнопки |
+| `main.py` | Основной цикл агента |
+| `setup_wizard.py` | Интерактивный мастер настройки |
 
-Перед физическим нажатием отправки `hh_client.py` повторно вызывает approval
-guard. Тот в одной SQLite-транзакции проверяет режим, feature flag, Telegram ID,
-TTL, письмо, статус, одноразовый permit и дневной лимит, затем переводит
-`approved` в `applying`. Поэтому прямой вызов низкоуровневого метода без
-валидного разрешения блокируется до создания страницы браузера.
-Завершить такую попытку может только тот же permit. После финального клика
-статус `applied` записывается только после явного success-сигнала HH; иначе
-вакансия остаётся терминальной ошибкой без автоповтора.
-Непосредственно перед этим кликом SQLite ещё раз проверяет TTL и дневную ёмкость.
+---
 
-Browser adapter не знает о подтверждениях. `CloakBrowserBackend` использует один
-persistent profile; `PlaywrightBrowserBackend` оставлен как явно выбираемый
-резерв. Автоматического переключения между ними нет.
+## Безопасность
 
-`VacancyAnalyzer` не знает URL или ключей provider-а. Единственная фабрика в
-`llm/factory.py` создаёт ровно один adapter. Общий managed-слой выполняет
-ограниченные retry, локальную Pydantic-проверку, SQLite-квоту и сохраняет только
-metadata usage. Автоматического LLM fallback нет: ошибка одного provider-а не
-передаёт профиль другому сервису.
+- Реальный отклик требует **трёх одновременных условий**: `APP_MODE=approval` + `ENABLE_REAL_APPLY=true` + нажатие кнопки твоим Telegram ID в течение 30 минут
+- Массового автоматического режима нет
+- `.env`, `profile.yaml` и `.browser-profile/` исключены из Git
+- Токены, cookies и полный `.env` не записываются в логи
 
-## 3. Установка на macOS ARM64
+---
 
-Поддерживаемая база — Python 3.13.14. На macOS ARM64 полный набор закреплённых
-зависимостей и полный unit-test suite проверены также с Python 3.14.5. Для наиболее
-предсказуемой установки используйте 3.13, поскольку метаданные CloakBrowser
-0.5.2 пока не заявляют Python 3.14.
+## Типичные ошибки
 
-```bash
-brew install python@3.13
-"$(brew --prefix python@3.13)/bin/python3.13" -m venv .venv
-source .venv/bin/activate
-python3 -m pip install --upgrade pip
-python3 -m pip install -r requirements.txt
-python3 -m pip install -r requirements-dev.txt
-```
+| Ошибка | Решение |
+|---|---|
+| `Configuration error` | Заполни все обязательные поля через `python setup_wizard.py --edit` |
+| `CloakBrowser failed to start` | Проверь `python -m cloakbrowser info`, при необходимости смени на `BROWSER_BACKEND=playwright` |
+| `HH.ru login is required` | Запусти с `BROWSER_HEADLESS=false` и войди вручную |
+| `LLM check failed` | Проверь endpoint, ключ и дневную квоту через `python main.py --check-llm` |
+| `Invalid model response` | Проверь провайдер и модель — вакансия безопасно пропускается |
 
-Для резервного Playwright backend установите Chromium:
-
-```bash
-python3 -m playwright install chromium
-```
-
-CloakBrowser закреплён как `cloakbrowser==0.5.2`. Первый запуск скачивает
-бинарник в `~/.cloakbrowser`, а не в репозиторий. Предварительная установка:
-
-```bash
-python3 -m cloakbrowser install
-```
-
-На некоторых Mac Gatekeeper блокирует первый запуск ad-hoc signed Chromium. В
-Finder откройте скачанный `Chromium.app` через правый клик → **Open** → **Open**,
-после чего повторите команду. Не отключайте Gatekeeper целиком.
-
-Проверить backend на нейтральной странице, не открывая HH.ru:
-
-```bash
-python3 -m scripts.browser_smoke --backend cloakbrowser --no-headless --profile-dir .browser-smoke-profile
-```
-
-Ожидаются `status=200` и `title=Example Domain`. Smoke-test ручной и не входит в
-`pytest`.
-
-## 4. Настройка LLM provider
-
-Общие настройки в `.env`:
-
-```ini
-LLM_PROVIDER=ollama
-LLM_MODEL=llama3
-LLM_TIMEOUT_SECONDS=30
-LLM_MAX_RETRIES=1
-LLM_TEMPERATURE=0
-LLM_MAX_OUTPUT_TOKENS=1200
-LLM_MAX_REQUESTS_PER_DAY=100
-```
-
-### Ollama
-
-Установите официальное приложение Ollama для macOS, запустите его и загрузите
-модель, совпадающую с `LLM_MODEL`:
-
-```bash
-ollama pull llama3
-```
-
-Если приложение не запустило локальный сервер автоматически, выполните
-`ollama serve`. Конфигурация:
-
-```ini
-LLM_PROVIDER=ollama
-LLM_MODEL=llama3
-OLLAMA_URL=http://localhost:11434/api/generate
-```
-
-Проверка локального API: `curl http://localhost:11434/api/tags`. Официальные
-инструкции: [Ollama for macOS](https://docs.ollama.com/macos) и
-[CLI reference](https://docs.ollama.com/cli).
-
-### Mistral
-
-Используется официальный SDK `mistralai==2.7.0`. Создайте отдельный API key в
-Mistral, храните его только в `.env` и выберите доступную вашему аккаунту модель:
-
-```ini
-LLM_PROVIDER=mistral
-LLM_MODEL=mistral-small-latest
-MISTRAL_API_KEY=replace_me
-MISTRAL_BASE_URL=
-```
-
-Пустой `MISTRAL_BASE_URL` использует официальный endpoint SDK. Нестандартный URL
-разрешён только по HTTPS. При Mistral локальный профиль и текст вакансии уходят
-во внешний API; оцените это до включения.
-
-### OpenAI-compatible custom API
-
-Adapter поддерживает только `<base>/chat/completions`, строковый
-`message.content` и необязательный `json_object` mode:
-
-```ini
-LLM_PROVIDER=openai_compatible
-LLM_MODEL=your-model
-OPENAI_COMPATIBLE_BASE_URL=https://provider.example/v1
-OPENAI_COMPATIBLE_API_KEY=replace_me
-OPENAI_COMPATIBLE_JSON_MODE=true
-```
-
-Это не обещание совместимости с OpenAI Responses API, Anthropic Messages API
-или любым сервером, называющим себя OpenAI-compatible. Удалённый URL обязан быть
-HTTPS; HTTP допускается только для loopback `localhost`, `127.0.0.1` или `::1`.
-
-После `--check-config` можно выполнить один безопасный минимальный LLM-запрос:
-
-```bash
-python3 main.py --check-llm
-```
-
-Команда выводит provider, model, latency и success, не запускает HH.ru, браузер
-или Telegram. Она всё же обращается к выбранному LLM и расходует одну
-SQLite-квоту. Эквивалентный ручной smoke с явным provider-ом:
-
-```bash
-python3 -m scripts.llm_smoke --provider mistral
-```
-
-Без обязательного ключа команда завершается понятной configuration error.
-Реальные Mistral/custom smoke-запросы при разработке проекта не выполнялись.
-
-## 5. Создание Telegram-бота
-
-1. Откройте официальный `@BotFather`.
-2. Выполните `/newbot` и сохраните выданный токен как пароль.
-3. Узнайте свой числовой Telegram user ID. Если используете стороннего бота для
-   этого, учитывайте его политику приватности.
-4. Откройте созданного бота и нажмите **Start**: Telegram-бот не может первым
-   начать диалог с пользователем.
-
-Токен хранится только в `.env`. Не вставляйте его в issue, commit, лог или
-скриншот. Официальное руководство: [Telegram BotFather tutorial](https://core.telegram.org/bots/tutorial).
-
-## 6. Заполнение профиля
-
-Создайте локальные файлы:
-
-```bash
-cp .env.example .env
-cp profile.example.yaml profile.yaml
-```
-
-`profile.yaml` уже исключён из Git. Обязательные поля:
-
-- `candidate.name` — ваше имя для письма;
-- `candidate.desired_positions` — непустой список желаемых ролей;
-- `candidate.experience_summary` — только подтверждаемый опыт;
-- `hh.resume_name` — точное название резюме на HH.ru;
-- `hh.search_queries` — непустой список запросов.
-
-Остальные поля кандидата заполняйте только реальными фактами:
-`location`, `education`, `technologies`, `projects`, `github_url`,
-`salary_expectation`, `work_format`, `excluded_positions` и
-`additional_information`.
-
-В секции `hh` доступны `areas` с ID регионов и `experience_filters` со значениями
-фильтра HH. В `cover_letter` задаются `language`, `max_length` и `style`.
-
-Проверка без браузера и внешних запросов:
-
-```bash
-python3 main.py --check-config
-```
-
-При ошибке программа выводит одно сообщение `Configuration error:` без
-traceback.
-
-## 7. Первый вход на HH.ru
-
-Оставьте в `.env`:
-
-```ini
-APP_MODE=dry_run
-ENABLE_REAL_APPLY=false
-BROWSER_BACKEND=cloakbrowser
-BROWSER_HEADLESS=false
-BROWSER_PROFILE_DIR=.browser-profile
-```
-
-Запустите:
-
-```bash
-python3 main.py
-```
-
-В открытом окне вручную войдите в HH.ru, вернитесь в терминал и нажмите Enter.
-Cookies, local storage и кэш сохраняются в `.browser-profile`. Не копируйте этот
-каталог в Git или облачную папку. При `BROWSER_HEADLESS=true` первичный вход
-невозможен и запуск завершится понятной ошибкой.
-
-## 8. Dry-run
-
-Безопасная конфигурация:
-
-```ini
-APP_MODE=dry_run
-ENABLE_REAL_APPLY=false
-```
-
-Запуск:
-
-```bash
-python3 main.py --check-config
-python3 main.py
-```
-
-Бот ищет, читает, фильтрует, вызывает выбранный LLM provider, сохраняет
-результаты и отправляет Telegram-превью без кнопок реального действия. Даже
-сформированный вручную прямой вызов sender будет отклонён approval guard.
-
-## 9. Режим подтверждения
-
-Сначала остановите процесс через Ctrl+C. После успешного dry-run измените ровно
-две строки:
-
-```ini
-APP_MODE=approval
-ENABLE_REAL_APPLY=true
-```
-
-Затем снова выполните:
-
-```bash
-python3 main.py --check-config
-python3 main.py
-```
-
-Подходящая вакансия получит статус `pending_approval` и кнопки
-`Откликнуться`/`Пропустить`. Каждая кнопка привязана к ID вакансии. Подтверждение
-одноразовое и действует `APPROVAL_TTL_MINUTES` (по умолчанию 30 минут).
-
-## 10. Проверка перед реальным откликом
-
-Перед включением approval убедитесь, что:
-
-- `/status` показывает ожидаемый режим и user ID принадлежит только вам;
-- профиль не содержит чужих или неподтверждённых сведений;
-- название резюме совпадает с HH.ru;
-- дневной лимит `MAX_APPLICATIONS_PER_DAY` подходит вам;
-- письмо в Telegram прочитано полностью;
-- ссылка, компания, объяснение и confidence относятся к нужной вакансии;
-- в базе нет застрявшего `applying` для этой вакансии.
-
-Нажатие `Пропустить` переводит вакансию в `skipped`. Просроченная карточка
-становится `expired`. Автоматического повтора отклика нет.
-
-## 11. Команды Telegram
-
-- `/start` — краткая справка;
-- `/status` — режим, состояние, обработанные вакансии и отклики сегодня;
-- `/pause` — остановить новый поиск, сохранив процесс и Telegram polling;
-- `/resume` — продолжить поиск;
-- `/pending` — показать ожидающие решения;
-- `/stats` — статистика SQLite по статусам;
-- `/cancel` — отменить текущий ручной ввод CAPTCHA.
-
-Команды и callback-кнопки доступны только `TG_USER_ID`. Остальные пользователи
-получают нейтральный отказ без ID, токена и конфигурации.
-
-## 12. Резервное копирование базы
-
-Полностью остановите приложение (`Ctrl+C`), затем используйте штатный
-SQLite. `/pause` недостаточно: Telegram-callback и отклик могут ещё записывать данные.
-
-```bash
-mkdir -p backups
-sqlite3 agent.db ".backup 'backups/agent-backup.db'"
-sqlite3 backups/agent-backup.db "PRAGMA integrity_check;"
-```
-
-Ожидаемый результат второй команды — `ok`. Храните backup как персональные
-данные и не добавляйте его в Git.
-
-Старая таблица `applied_jobs` сохраняется без изменений. Она не импортируется в
-новую статистику: прежняя версия записывала туда реальные отклики, отклонения и
-пропуски без различия.
-
-## 13. Сброс авторизованной сессии
-
-Остановите приложение и переместите профиль в резервную папку:
-
-```bash
-mv .browser-profile .browser-profile.backup
-```
-
-При следующем запуске с `BROWSER_HEADLESS=false` будет создан чистый профиль и
-потребуется новый ручной вход. Старую папку удаляйте только после проверки новой
-сессии; она содержит cookies и должна храниться приватно.
-
-## 14. Типичные ошибки
-
-- `Configuration error` — заполните перечисленные поля `.env`/`profile.yaml`.
-- `CloakBrowser failed to start` — проверьте Gatekeeper и
-  `python3 -m cloakbrowser info`; для резервного backend явно установите
-  `BROWSER_BACKEND=playwright` и Chromium.
-- `HH.ru login is required` — включите headed mode и войдите вручную.
-- `Invalid model response` — проверьте выбранный provider и модель; вакансия
-  безопасно отклоняется, а не считается подходящей.
-- `LLM check failed` — проверьте endpoint, ключ, модель и дневную LLM-квоту по
-  `error_type`; prompt и полный ответ намеренно не логируются.
-- `page_structure_changed` — изменились селекторы HH; вакансия помечается
-  ошибкой, цикл продолжает работу.
-- `captcha_detected` — решите CAPTCHA вручную до тайм-аута или отмените; число
-  попыток ограничено.
-- `application_blocked` — проверьте режим, flag, TTL, владельца, статус, письмо
-  и дневной лимит.
-- `applying` после аварийного завершения — не повторяйте отклик автоматически;
-  проверьте его наличие вручную на HH.ru и исправьте статус только после этого.
-
-Логи ротируются в `agent.log`. Токены, cookies, profile/storage state и полный
-`.env` туда не записываются.
-
-## 15. Ограничения проекта
-
-- Автоматизация может нарушать правила HH.ru; ответственность за использование
-  и состояние аккаунта несёт пользователь.
-- CloakBrowser — экспериментальный backend, уменьшающий некоторые сигналы
-  автоматизации. Он не гарантирует отсутствие обнаружения или CAPTCHA.
-- Проект не использует proxy, GeoIP, ротацию IP, внешние CAPTCHA-сервисы или
-  автоматический fallback.
-- Селекторы и сценарий формы HH.ru могут измениться. Реальный отклик в тестах не
-  выполняется, поэтому live selector success не подтверждён.
-- Редактирование письма в Telegram пока не реализовано.
-- После process crash статус `applying` намеренно остаётся fail-closed.
-- Сервис рассчитан на одного владельца и одну локальную SQLite-базу.
-- Каждый фактический LLM-вызов, включая retry и незавершённую попытку после
-  crash, атомарно занимает строку `llm_requests`. Лимит считается по SQLite за
-  локальный календарный день и переживает перезапуск. Денежная оценка не
-  вычисляется: цены моделей меняются.
-- Prompt ограничивает модель фактами профиля, а письмо отбрасывается при
-  служебном префиксе, Markdown fence, повторе известных injection-команд или
-  неизвестной ссылке. Полностью доказать отсутствие смысловой галлюцинации
-  автоматически невозможно — письмо всегда нужно прочитать в Telegram.
-- Пользователь или локальный процесс с правом записи в SQLite может изменить её
-  состояние; модель угроз защищает от случайного submit, а не от скомпрометированной
-  машины.
+---
 
 ## Разработка
 
-Unit-тесты не обращаются к HH.ru, Telegram или внешним LLM API:
+Тесты не обращаются к HH.ru, Telegram или внешним LLM:
 
 ```bash
-python3 -m compileall .
+python -m compileall .
 pytest -q
 ```
 
-Чтобы добавить новый API, реализуйте `ProviderAdapter.complete()` и `close()`,
-нормализуйте ошибки без response body/ключа, зарегистрируйте adapter только в
-`llm/factory.py` и покройте payload, schema, retry и fake-тестами. OpenAI
-Responses и Anthropic Messages требуют отдельных adapters; production-заглушек
-для них нет.
+---
 
-Пошаговая установка для начинающего пользователя находится в
-[`SETUP_CHECKLIST.md`](SETUP_CHECKLIST.md).
+## Ограничения
+
+- Автоматизация может нарушать правила HH.ru — ответственность за аккаунт несёт пользователь
+- CloakBrowser не гарантирует отсутствие детектирования или CAPTCHA
+- Нет proxy, GeoIP-ротации и внешних CAPTCHA-сервисов
+- Рассчитано на одного владельца и одну SQLite-базу
+- Письмо всегда нужно читать в Telegram перед откликом
+
+---
+
+## Благодарности
+
+Огромное спасибо **[kkonstantin08](https://github.com/kkonstantin08)** за разработку этой архитектуры — именно он спроектировал весь безопасный конвейер от поиска вакансий до approval-механизма с permit-токенами.
+
+Также благодарность **[danscMax](https://github.com/danscMax)** — он реализовал базовые проверки и валидацию конфигурации, которые легли в основу надёжной работы агента.
+
+---
+
+## Контакты
+
+Вопросы и предложения: **[fikstt2](https://github.com/fikstt2)**
