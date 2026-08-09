@@ -97,6 +97,31 @@ def test_expired_cooldown_returns_to_ready_atomically(tmp_path) -> None:
     assert ready.last_error_type == ""
 
 
+def test_encrypted_key_read_does_not_release_expired_cooldown(tmp_path) -> None:
+    database = make_database(tmp_path)
+    key_id = add_key(database)
+    database.update_mistral_key_state(
+        key_id,
+        status="cooldown",
+        cooldown_until=NOW - timedelta(minutes=1),
+        last_checked_at=NOW,
+        last_error_type="rate_limit",
+        now=NOW,
+    )
+    with sqlite3.connect(database.path) as connection:
+        before = connection.execute(
+            "SELECT * FROM mistral_api_keys WHERE id = ?", (key_id,)
+        ).fetchone()
+
+    assert database.mistral_encrypted_keys() == ("cipher-one",)
+
+    with sqlite3.connect(database.path) as connection:
+        after = connection.execute(
+            "SELECT * FROM mistral_api_keys WHERE id = ?", (key_id,)
+        ).fetchone()
+    assert after == before
+
+
 def test_legacy_import_runs_once_even_after_delete(tmp_path) -> None:
     database = make_database(tmp_path)
     key_id = database.import_legacy_mistral_key(

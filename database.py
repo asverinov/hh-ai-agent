@@ -922,6 +922,15 @@ class Database:
             )
             return int(cursor.lastrowid) if cursor.rowcount == 1 else None
 
+    def mistral_encrypted_keys(self) -> tuple[str, ...]:
+        with self._connect() as connection:
+            return tuple(
+                row["encrypted_key"]
+                for row in connection.execute(
+                    "SELECT encrypted_key FROM mistral_api_keys ORDER BY id"
+                )
+            )
+
     def mistral_key(self, key_id: int, now: datetime) -> MistralKeyRow | None:
         with self._connect() as connection:
             self._release_expired_mistral_keys(connection, now)

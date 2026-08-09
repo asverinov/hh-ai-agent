@@ -104,6 +104,8 @@ class MistralKeyManager:
         self.settings = settings
         self.database = database
         self._cipher = MistralKeyCipher(settings.mistral_keys_master_key)
+        for encrypted_key in database.mistral_encrypted_keys():
+            self._cipher.reveal(encrypted_key)
         self._adapter_factory = adapter_factory or (
             lambda api_key: MistralProvider(api_key, settings.mistral_base_url)
         )

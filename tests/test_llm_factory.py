@@ -1,4 +1,6 @@
+import asyncio
 from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -8,9 +10,10 @@ from config import load_settings
 from database import Database
 from llm.errors import LLMConfigurationError
 from llm.factory import create_llm_provider
-from llm.mistral_keys import MistralKeyManager
+from llm.mistral_keys import MistralKeyCipher, MistralKeyManager
 from llm.providers.ollama import OllamaProvider
 from llm.providers.openai_compatible import OpenAICompatibleProvider
+import main as main_module
 from tests.test_config import VALID_ENV, write_profile
 
 
@@ -63,6 +66,70 @@ def test_factory_builds_mistral_key_manager(tmp_path: Path) -> None:
 
     assert isinstance(provider, MistralKeyManager)
     assert provider.list_keys() == ()
+
+
+def test_factory_rejects_wrong_master_for_existing_keys(tmp_path: Path) -> None:
+    original_master = Fernet.generate_key().decode()
+    database = Database(tmp_path / "agent.db")
+    database.init()
+    protected = MistralKeyCipher(original_master).protect("mistral-existing-key")
+    assert database.add_mistral_key(
+        encrypted_key=protected.encrypted_key,
+        key_hmac=protected.key_hmac,
+        suffix=protected.suffix,
+        now=datetime(2026, 8, 9, tzinfo=UTC),
+    ) is not None
+    settings = configured(
+        tmp_path,
+        LLM_PROVIDER="mistral",
+        LLM_MODEL="mistral-small-latest",
+        MISTRAL_KEYS_MASTER_KEY=Fernet.generate_key().decode(),
+    )
+
+    with pytest.raises(LLMConfigurationError) as raised:
+        create_llm_provider(settings, database)
+
+    assert "MISTRAL_KEYS_MASTER_KEY" in str(raised.value)
+    assert protected.encrypted_key not in str(raised.value)
+
+
+def test_main_does_not_start_backend_when_existing_keys_use_another_master(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    original_master = Fernet.generate_key().decode()
+    database_path = tmp_path / "agent.db"
+    database = Database(database_path)
+    database.init()
+    protected = MistralKeyCipher(original_master).protect("mistral-existing-key")
+    assert database.add_mistral_key(
+        encrypted_key=protected.encrypted_key,
+        key_hmac=protected.key_hmac,
+        suffix=protected.suffix,
+        now=datetime(2026, 8, 9, tzinfo=UTC),
+    ) is not None
+    settings = configured(
+        tmp_path,
+        LLM_PROVIDER="mistral",
+        LLM_MODEL="mistral-small-latest",
+        MISTRAL_KEYS_MASTER_KEY=Fernet.generate_key().decode(),
+    )
+    settings = replace(settings, database_path=database_path)
+
+    class BackendMustNotStart:
+        async def start(self):
+            raise AssertionError("backend must not start")
+
+        async def close(self):
+            return None
+
+    monkeypatch.setattr(
+        main_module,
+        "create_browser_backend",
+        lambda _settings: BackendMustNotStart(),
+    )
+
+    with pytest.raises(LLMConfigurationError):
+        asyncio.run(main_module.run(settings))
 
 
 def test_factory_rejects_unknown_provider_even_if_validation_is_bypassed(

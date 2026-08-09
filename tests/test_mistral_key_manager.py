@@ -54,6 +54,18 @@ def no_adapter(_api_key: str):
     raise AssertionError("legacy migration must not use the network")
 
 
+def key_store_snapshot(database: Database):
+    with sqlite3.connect(database.path) as connection:
+        return (
+            connection.execute(
+                "SELECT * FROM mistral_api_keys ORDER BY id"
+            ).fetchall(),
+            connection.execute(
+                "SELECT * FROM mistral_key_store_meta ORDER BY singleton"
+            ).fetchall(),
+        )
+
+
 class StructuredAnswer(BaseModel):
     value: str
 
@@ -166,6 +178,78 @@ def test_wrong_master_key_fails_without_exposing_ciphertext() -> None:
 
     assert encrypted not in str(raised.value)
     assert "MISTRAL_KEYS_MASTER_KEY" in str(raised.value)
+
+
+def test_manager_rejects_wrong_master_before_network_or_database_changes(
+    tmp_path,
+) -> None:
+    original_master = Fernet.generate_key().decode()
+    database = Database(tmp_path / "agent.db")
+    database.init()
+    protected = MistralKeyCipher(original_master).protect(
+        "mistral-existing-super-secret"
+    )
+    key_id = database.add_mistral_key(
+        encrypted_key=protected.encrypted_key,
+        key_hmac=protected.key_hmac,
+        suffix=protected.suffix,
+        now=NOW,
+    )
+    assert key_id is not None
+    assert database.update_mistral_key_state(
+        key_id,
+        status="cooldown",
+        cooldown_until=NOW - timedelta(minutes=1),
+        last_checked_at=NOW,
+        last_error_type="rate_limit",
+        now=NOW,
+    )
+    before = key_store_snapshot(database)
+    adapter_calls: list[str] = []
+
+    def adapter_factory(api_key: str):
+        adapter_calls.append(api_key)
+        raise AssertionError("adapter must not be created")
+
+    with pytest.raises(LLMConfigurationError) as raised:
+        MistralKeyManager(
+            mistral_settings(
+                tmp_path,
+                Fernet.generate_key().decode(),
+                "mistral-new-legacy-secret",
+            ),
+            database,
+            adapter_factory=adapter_factory,
+            now_factory=lambda: NOW,
+        )
+
+    assert "MISTRAL_KEYS_MASTER_KEY" in str(raised.value)
+    assert protected.encrypted_key not in str(raised.value)
+    assert "mistral-existing-super-secret" not in str(raised.value)
+    assert adapter_calls == []
+    assert key_store_snapshot(database) == before
+
+
+def test_manager_accepts_existing_ciphertext_with_correct_master(tmp_path) -> None:
+    master_key = Fernet.generate_key().decode()
+    database = Database(tmp_path / "agent.db")
+    database.init()
+    protected = MistralKeyCipher(master_key).protect("mistral-existing-key")
+    assert database.add_mistral_key(
+        encrypted_key=protected.encrypted_key,
+        key_hmac=protected.key_hmac,
+        suffix=protected.suffix,
+        now=NOW,
+    ) is not None
+
+    manager = MistralKeyManager(
+        mistral_settings(tmp_path, master_key),
+        database,
+        adapter_factory=no_adapter,
+        now_factory=lambda: NOW,
+    )
+
+    assert isinstance(manager, MistralKeyManager)
 
 
 def test_manager_imports_legacy_key_once_without_plaintext_in_sqlite(tmp_path) -> None:
