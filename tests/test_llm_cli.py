@@ -1,6 +1,10 @@
 from pathlib import Path
 
+from cryptography.fernet import Fernet
+
 import main
+import llm.mistral_keys as mistral_keys_module
+from llm.providers.fake import FakeProvider
 from llm.types import LLMRequest, LLMResponse
 from tests.test_config import VALID_ENV, write_profile
 
@@ -126,3 +130,78 @@ def test_check_llm_hides_invalid_mistral_master_key(tmp_path: Path, capsys) -> N
     assert "MISTRAL_KEYS_MASTER_KEY" in output.err
     assert invalid_master_key not in output.err
     assert "Traceback" not in output.err
+
+
+def test_check_llm_reports_empty_mistral_pool_without_traceback(
+    tmp_path: Path, capsys
+) -> None:
+    result = main.cli(
+        [
+            "--env-file",
+            str(
+                write_env(
+                    tmp_path,
+                    LLM_PROVIDER="mistral",
+                    LLM_MODEL="mistral-small-latest",
+                    MISTRAL_KEYS_MASTER_KEY=Fernet.generate_key().decode(),
+                )
+            ),
+            "--profile",
+            str(write_profile(tmp_path)),
+            "--check-llm",
+        ]
+    )
+
+    output = capsys.readouterr()
+    assert result == 1
+    assert "error_type=no_available_keys" in output.err
+    assert "Traceback" not in output.err
+
+
+def test_check_llm_uses_imported_legacy_mistral_key(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    raw_key = "legacy-mistral-test-key"
+    adapters: list[FakeProvider] = []
+
+    def fake_adapter(api_key: str, _base_url: str) -> FakeProvider:
+        assert api_key == raw_key
+        adapter = FakeProvider(
+            [
+                LLMResponse(
+                    text="OK",
+                    provider="mistral",
+                    model="mistral-small-latest",
+                )
+            ]
+        )
+        adapters.append(adapter)
+        return adapter
+
+    monkeypatch.setattr(mistral_keys_module, "MistralProvider", fake_adapter)
+
+    result = main.cli(
+        [
+            "--env-file",
+            str(
+                write_env(
+                    tmp_path,
+                    LLM_PROVIDER="mistral",
+                    LLM_MODEL="mistral-small-latest",
+                    MISTRAL_API_KEY=raw_key,
+                    MISTRAL_KEYS_MASTER_KEY=Fernet.generate_key().decode(),
+                )
+            ),
+            "--profile",
+            str(write_profile(tmp_path)),
+            "--check-llm",
+        ]
+    )
+
+    output = capsys.readouterr()
+    assert result == 0
+    assert "success=true" in output.out
+    assert output.err == ""
+    assert len(adapters) == 1
+    assert adapters[0].requests[0].operation == "healthcheck"
+    assert adapters[0].closed is True

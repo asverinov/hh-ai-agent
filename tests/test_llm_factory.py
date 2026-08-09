@@ -8,7 +8,7 @@ from config import load_settings
 from database import Database
 from llm.errors import LLMConfigurationError
 from llm.factory import create_llm_provider
-from llm.providers.mistral import MistralProvider
+from llm.mistral_keys import MistralKeyManager
 from llm.providers.ollama import OllamaProvider
 from llm.providers.openai_compatible import OpenAICompatibleProvider
 from tests.test_config import VALID_ENV, write_profile
@@ -25,15 +25,6 @@ def configured(tmp_path: Path, **overrides: str):
     ("overrides", "adapter_type"),
     [
         ({}, OllamaProvider),
-        (
-            {
-                "LLM_PROVIDER": "mistral",
-                "LLM_MODEL": "mistral-small-latest",
-                "MISTRAL_API_KEY": "mistral-key",
-                "MISTRAL_KEYS_MASTER_KEY": Fernet.generate_key().decode(),
-            },
-            MistralProvider,
-        ),
         (
             {
                 "LLM_PROVIDER": "openai_compatible",
@@ -56,6 +47,22 @@ def test_factory_builds_exactly_one_selected_adapter(
 
     assert isinstance(provider.adapter, adapter_type)
     assert not hasattr(provider, "fallbacks")
+
+
+def test_factory_builds_mistral_key_manager(tmp_path: Path) -> None:
+    settings = configured(
+        tmp_path,
+        LLM_PROVIDER="mistral",
+        LLM_MODEL="mistral-small-latest",
+        MISTRAL_KEYS_MASTER_KEY=Fernet.generate_key().decode(),
+    )
+    database = Database(tmp_path / "agent.db")
+    database.init()
+
+    provider = create_llm_provider(settings, database)
+
+    assert isinstance(provider, MistralKeyManager)
+    assert provider.list_keys() == ()
 
 
 def test_factory_rejects_unknown_provider_even_if_validation_is_bypassed(

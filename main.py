@@ -18,6 +18,7 @@ from hh_client import HHClient, PageState, VacancySummary
 from llm.base import LLMProvider
 from llm.errors import LLMError
 from llm.factory import create_llm_provider
+from llm.mistral_keys import MistralKeyManager
 from llm.types import LLMRequest
 from logging_setup import configure_logging
 from tg_bot import AgentControl, TelegramService
@@ -184,6 +185,9 @@ async def run(settings: Settings) -> None:
     database.init()
     backend = create_browser_backend(settings)
     llm_provider = create_llm_provider(settings, database)
+    mistral_keys = (
+        llm_provider if isinstance(llm_provider, MistralKeyManager) else None
+    )
     telegram: TelegramService | None = None
     try:
         context = await backend.start()
@@ -196,9 +200,11 @@ async def run(settings: Settings) -> None:
         control = AgentControl()
         approval_service = ApprovalService(settings, database, hh_client)
         telegram = TelegramService(
-            settings, database, approval_service, control
+            settings, database, approval_service, control, mistral_keys=mistral_keys
         )
         analyzer = VacancyAnalyzer(settings, llm_provider)
+        if mistral_keys is not None:
+            mistral_keys.set_notifier(telegram.notify)
         await asyncio.gather(
             telegram.start_polling(),
             agent_loop(settings, database, hh_client, analyzer, telegram, control),

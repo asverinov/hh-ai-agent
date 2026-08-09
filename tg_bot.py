@@ -22,6 +22,7 @@ from aiogram.types import (
 from approval import ApprovalService
 from config import Settings
 from database import Database, Vacancy
+from llm.mistral_keys import MistralKeyManager
 
 
 logger = logging.getLogger(__name__)
@@ -42,6 +43,7 @@ class TelegramService:
         approval_service: ApprovalService,
         control: AgentControl,
         *,
+        mistral_keys: MistralKeyManager | None = None,
         bot: Any | None = None,
         dispatcher: Dispatcher | None = None,
         now_factory: Callable[[], datetime] | None = None,
@@ -50,6 +52,7 @@ class TelegramService:
         self.database = database
         self.approval_service = approval_service
         self.control = control
+        self.mistral_keys = mistral_keys
         self.bot = bot or Bot(token=settings.tg_bot_token)
         self.dispatcher = dispatcher or Dispatcher()
         self.now_factory = now_factory or (lambda: datetime.now().astimezone())
