@@ -53,6 +53,18 @@ class LLMDailyLimitError(LLMError):
     category = "daily_limit"
 
 
+class LLMNoAvailableKeysError(LLMError):
+    category = "no_available_keys"
+
+
+class MistralKeyInputError(LLMError):
+    category = "invalid_key"
+
+
+class MistralKeyDuplicateError(LLMError):
+    category = "duplicate_key"
+
+
 def error_for_http_status(
     status: int, retry_after_header: object = None
 ) -> LLMError:

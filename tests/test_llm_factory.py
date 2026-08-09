@@ -2,6 +2,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from cryptography.fernet import Fernet
 
 from config import load_settings
 from database import Database
@@ -29,6 +30,7 @@ def configured(tmp_path: Path, **overrides: str):
                 "LLM_PROVIDER": "mistral",
                 "LLM_MODEL": "mistral-small-latest",
                 "MISTRAL_API_KEY": "mistral-key",
+                "MISTRAL_KEYS_MASTER_KEY": Fernet.generate_key().decode(),
             },
             MistralProvider,
         ),
