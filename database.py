@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import secrets
 import sqlite3
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, time, timedelta
 from enum import Enum
 from pathlib import Path
@@ -46,6 +46,20 @@ class Vacancy:
     applied_at: str | None
     approver_id: int | None
     error_text: str
+
+
+@dataclass(frozen=True)
+class MistralKeyRow:
+    id: int
+    encrypted_key: str = field(repr=False)
+    key_hmac: str = field(repr=False)
+    suffix: str
+    status: str
+    cooldown_until: str | None
+    last_checked_at: str | None
+    last_error_type: str
+    created_at: str
+    updated_at: str
 
 
 @dataclass(frozen=True)
@@ -178,6 +192,36 @@ class Database:
             )
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS llm_requests_provider_idx ON llm_requests(provider)"
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS mistral_api_keys (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    encrypted_key TEXT NOT NULL,
+                    key_hmac TEXT NOT NULL UNIQUE,
+                    suffix TEXT NOT NULL,
+                    status TEXT NOT NULL CHECK (status IN ('ready', 'cooldown', 'disabled')),
+                    cooldown_until TEXT,
+                    last_checked_at TEXT,
+                    last_error_type TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS mistral_key_store_meta (
+                    singleton INTEGER PRIMARY KEY CHECK (singleton = 1),
+                    legacy_import_completed INTEGER NOT NULL CHECK (legacy_import_completed IN (0, 1))
+                )
+                """
+            )
+            connection.execute(
+                """
+                INSERT OR IGNORE INTO mistral_key_store_meta(singleton, legacy_import_completed)
+                VALUES (1, 0)
+                """
             )
             columns = {
                 row[1] for row in connection.execute("PRAGMA table_info(vacancies)")
@@ -786,5 +830,158 @@ class Database:
             cursor = connection.execute(
                 "INSERT OR IGNORE INTO chat_messages (msg_id, chat_id, text) VALUES (?, ?, ?)",
                 (message_id, chat_id, text_value),
+            )
+            return cursor.rowcount == 1
+
+    @staticmethod
+    def _mistral_key_row(row: sqlite3.Row) -> MistralKeyRow:
+        return MistralKeyRow(
+            id=row["id"],
+            encrypted_key=row["encrypted_key"],
+            key_hmac=row["key_hmac"],
+            suffix=row["suffix"],
+            status=row["status"],
+            cooldown_until=row["cooldown_until"],
+            last_checked_at=row["last_checked_at"],
+            last_error_type=row["last_error_type"],
+            created_at=row["created_at"],
+            updated_at=row["updated_at"],
+        )
+
+    @staticmethod
+    def _release_expired_mistral_keys(
+        connection: sqlite3.Connection, now: datetime
+    ) -> None:
+        connection.execute(
+            """
+            UPDATE mistral_api_keys
+            SET status = 'ready', cooldown_until = NULL,
+                last_error_type = '', updated_at = ?
+            WHERE status = 'cooldown' AND cooldown_until <= ?
+            """,
+            (_iso(now), _iso(now)),
+        )
+
+    def import_legacy_mistral_key(
+        self,
+        *,
+        encrypted_key: str | None,
+        key_hmac: str | None,
+        suffix: str | None,
+        now: datetime,
+    ) -> int | None:
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            completed = connection.execute(
+                """
+                SELECT legacy_import_completed
+                FROM mistral_key_store_meta
+                WHERE singleton = 1
+                """
+            ).fetchone()[0]
+            if completed:
+                return None
+            key_id = None
+            if encrypted_key is not None and key_hmac is not None and suffix is not None:
+                cursor = connection.execute(
+                    """
+                    INSERT OR IGNORE INTO mistral_api_keys (
+                        encrypted_key, key_hmac, suffix, status, created_at, updated_at
+                    ) VALUES (?, ?, ?, 'ready', ?, ?)
+                    """,
+                    (encrypted_key, key_hmac, suffix, _iso(now), _iso(now)),
+                )
+                if cursor.rowcount == 1:
+                    key_id = int(cursor.lastrowid)
+            connection.execute(
+                """
+                UPDATE mistral_key_store_meta
+                SET legacy_import_completed = 1
+                WHERE singleton = 1
+                """
+            )
+            return key_id
+
+    def add_mistral_key(
+        self,
+        *,
+        encrypted_key: str,
+        key_hmac: str,
+        suffix: str,
+        now: datetime,
+    ) -> int | None:
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            cursor = connection.execute(
+                """
+                INSERT OR IGNORE INTO mistral_api_keys (
+                    encrypted_key, key_hmac, suffix, status, created_at, updated_at
+                ) VALUES (?, ?, ?, 'ready', ?, ?)
+                """,
+                (encrypted_key, key_hmac, suffix, _iso(now), _iso(now)),
+            )
+            return int(cursor.lastrowid) if cursor.rowcount == 1 else None
+
+    def mistral_key(self, key_id: int, now: datetime) -> MistralKeyRow | None:
+        with self._connect() as connection:
+            self._release_expired_mistral_keys(connection, now)
+            row = connection.execute(
+                "SELECT * FROM mistral_api_keys WHERE id = ?", (key_id,)
+            ).fetchone()
+            return None if row is None else self._mistral_key_row(row)
+
+    def mistral_key_by_hmac(
+        self, key_hmac: str, now: datetime
+    ) -> MistralKeyRow | None:
+        with self._connect() as connection:
+            self._release_expired_mistral_keys(connection, now)
+            row = connection.execute(
+                "SELECT * FROM mistral_api_keys WHERE key_hmac = ?", (key_hmac,)
+            ).fetchone()
+            return None if row is None else self._mistral_key_row(row)
+
+    def mistral_keys(self, now: datetime) -> list[MistralKeyRow]:
+        with self._connect() as connection:
+            self._release_expired_mistral_keys(connection, now)
+            rows = connection.execute(
+                "SELECT * FROM mistral_api_keys ORDER BY id"
+            ).fetchall()
+            return [self._mistral_key_row(row) for row in rows]
+
+    def update_mistral_key_state(
+        self,
+        key_id: int,
+        *,
+        status: str,
+        cooldown_until: datetime | None,
+        last_checked_at: datetime | None,
+        last_error_type: str,
+        now: datetime,
+    ) -> bool:
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            cursor = connection.execute(
+                """
+                UPDATE mistral_api_keys
+                SET status = ?, cooldown_until = ?, last_checked_at = ?,
+                    last_error_type = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (
+                    status,
+                    None if cooldown_until is None else _iso(cooldown_until),
+                    None if last_checked_at is None else _iso(last_checked_at),
+                    last_error_type,
+                    _iso(now),
+                    key_id,
+                ),
+            )
+            return cursor.rowcount == 1
+
+    def delete_mistral_key(self, key_id: int) -> bool:
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            cursor = connection.execute(
+                "DELETE FROM mistral_api_keys WHERE id = ?", (key_id,)
             )
             return cursor.rowcount == 1
