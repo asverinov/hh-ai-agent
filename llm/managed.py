@@ -32,6 +32,7 @@ class ManagedLLMProvider:
         database: Database,
         *,
         max_retries: int,
+        max_rate_limit_retries: int | None = None,
         max_requests_per_day: int,
         sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
         now_factory: Callable[[], datetime] = lambda: datetime.now().astimezone(),
@@ -39,6 +40,11 @@ class ManagedLLMProvider:
         self.adapter = adapter
         self.database = database
         self.max_retries = max_retries
+        self.max_rate_limit_retries = (
+            max_retries
+            if max_rate_limit_retries is None
+            else max_rate_limit_retries
+        )
         self.max_requests_per_day = max_requests_per_day
         self._sleep = sleep
         self._now = now_factory
@@ -128,9 +134,14 @@ class ManagedLLMProvider:
                     request.operation,
                     exc.category,
                 )
+                retry_limit = (
+                    self.max_rate_limit_retries
+                    if isinstance(exc, LLMRateLimitError)
+                    else self.max_retries
+                )
                 if (
                     not exc.retryable
-                    or attempt >= self.max_retries
+                    or attempt >= retry_limit
                     or invalid_responses > 1
                 ):
                     raise

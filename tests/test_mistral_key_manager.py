@@ -104,6 +104,7 @@ def make_manager(
     *,
     keys: tuple[str, ...],
     now_factory=lambda: NOW,
+    max_retries: int = 1,
     max_requests_per_day: int = 100,
 ):
     master_key = Fernet.generate_key().decode()
@@ -113,6 +114,7 @@ def make_manager(
             **VALID_ENV,
             "LLM_PROVIDER": "mistral",
             "LLM_MODEL": "mistral-small-latest",
+            "LLM_MAX_RETRIES": str(max_retries),
             "LLM_MAX_REQUESTS_PER_DAY": str(max_requests_per_day),
             "MISTRAL_KEYS_MASTER_KEY": master_key,
         },
@@ -280,6 +282,7 @@ def test_second_rate_limit_cools_key_and_rotates(tmp_path: Path) -> None:
             "second-mistral-key": [response("ok")],
         },
         keys=("first-mistral-key", "second-mistral-key"),
+        max_retries=5,
     )
 
     assert asyncio.run(manager.generate_text(request())).text == "ok"

@@ -59,6 +59,7 @@ def managed(
     outcomes: list[LLMResponse | Exception],
     *,
     max_retries: int = 1,
+    max_rate_limit_retries: int | None = None,
     daily_limit: int = 10,
     sleeps: list[float] | None = None,
 ) -> tuple[ManagedLLMProvider, FakeProvider, Database]:
@@ -74,6 +75,7 @@ def managed(
         adapter,
         database,
         max_retries=max_retries,
+        max_rate_limit_retries=max_rate_limit_retries,
         max_requests_per_day=daily_limit,
         sleep=record_sleep,
         now_factory=lambda: NOW,
@@ -96,6 +98,42 @@ def test_retryable_errors_retry_once_with_bounded_delay(
     assert len(adapter.requests) == 2
     assert sleeps == [0.5]
     assert database.llm_requests_today(NOW) == 2
+
+
+def test_default_rate_limit_uses_full_retry_budget(tmp_path: Path) -> None:
+    provider, adapter, _ = managed(
+        tmp_path,
+        [LLMRateLimitError(), LLMRateLimitError(), response("ok")],
+        max_retries=5,
+    )
+
+    assert asyncio.run(provider.generate_text(request())).text == "ok"
+    assert len(adapter.requests) == 3
+
+
+def test_opt_in_rate_limit_cap_never_retries_more_than_once(tmp_path: Path) -> None:
+    provider, adapter, _ = managed(
+        tmp_path,
+        [LLMRateLimitError(), LLMRateLimitError(), response("must not run")],
+        max_retries=5,
+        max_rate_limit_retries=1,
+    )
+
+    with pytest.raises(LLMRateLimitError):
+        asyncio.run(provider.generate_text(request()))
+
+    assert len(adapter.requests) == 2
+
+
+def test_zero_retries_disables_rate_limit_retry(tmp_path: Path) -> None:
+    provider, adapter, _ = managed(
+        tmp_path, [LLMRateLimitError(), response("must not run")], max_retries=0
+    )
+
+    with pytest.raises(LLMRateLimitError):
+        asyncio.run(provider.generate_text(request()))
+
+    assert len(adapter.requests) == 1
 
 
 def test_authentication_error_is_not_retried(tmp_path: Path) -> None:
