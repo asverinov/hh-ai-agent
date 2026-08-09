@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import pytest
+from cryptography.fernet import Fernet
 
 from config import ConfigError, load_settings
 from tests.test_config import VALID_ENV, write_profile
@@ -11,6 +12,30 @@ def load(tmp_path: Path, **overrides: str):
         profile_path=write_profile(tmp_path),
         environ={**VALID_ENV, **overrides},
     )
+
+
+def mistral_env(**overrides: str) -> dict[str, str]:
+    return {
+        "LLM_PROVIDER": "mistral",
+        "LLM_MODEL": "mistral-small-latest",
+        "MISTRAL_KEYS_MASTER_KEY": Fernet.generate_key().decode(),
+        **overrides,
+    }
+
+
+def test_mistral_accepts_master_key_without_legacy_api_key(tmp_path: Path) -> None:
+    settings = load(tmp_path, **mistral_env())
+
+    assert settings.llm.mistral_keys_master_key
+    assert settings.llm.mistral_api_key == ""
+
+
+@pytest.mark.parametrize("master_key", ["", "not-base64", "c2hvcnQ="])
+def test_mistral_rejects_missing_or_invalid_master_key(
+    tmp_path: Path, master_key: str
+) -> None:
+    with pytest.raises(ConfigError, match="MISTRAL_KEYS_MASTER_KEY"):
+        load(tmp_path, **mistral_env(MISTRAL_KEYS_MASTER_KEY=master_key))
 
 
 def test_llm_defaults_preserve_existing_ollama_configuration(tmp_path: Path) -> None:
@@ -32,24 +57,18 @@ def test_llm_defaults_preserve_existing_ollama_configuration(tmp_path: Path) -> 
     [
         ({"LLM_PROVIDER": "unknown"}, "LLM_PROVIDER must be"),
         (
-            {"LLM_PROVIDER": "mistral", "LLM_MODEL": "mistral-small-latest"},
-            "MISTRAL_API_KEY is required",
+            mistral_env(MISTRAL_KEYS_MASTER_KEY=""),
+            "MISTRAL_KEYS_MASTER_KEY is required",
         ),
         (
-            {
-                "LLM_PROVIDER": "mistral",
-                "LLM_MODEL": "",
-                "MISTRAL_API_KEY": "secret",
-            },
+            mistral_env(LLM_MODEL="", MISTRAL_API_KEY="secret"),
             "LLM_MODEL is required",
         ),
         (
-            {
-                "LLM_PROVIDER": "mistral",
-                "LLM_MODEL": "mistral-small-latest",
-                "MISTRAL_API_KEY": "secret",
-                "MISTRAL_BASE_URL": "http://localhost:9000",
-            },
+            mistral_env(
+                MISTRAL_API_KEY="secret",
+                MISTRAL_BASE_URL="http://localhost:9000",
+            ),
             "MISTRAL_BASE_URL must use HTTPS",
         ),
         (
@@ -118,9 +137,7 @@ def test_mistral_uses_its_own_key_and_never_exposes_it_in_errors(
     key = "mistral-super-secret"
     settings = load(
         tmp_path,
-        LLM_PROVIDER="mistral",
-        LLM_MODEL="mistral-small-latest",
-        MISTRAL_API_KEY=key,
+        **mistral_env(MISTRAL_API_KEY=key),
     )
     assert settings.llm.mistral_api_key == key
     assert settings.llm.openai_compatible_api_key == ""
@@ -128,10 +145,10 @@ def test_mistral_uses_its_own_key_and_never_exposes_it_in_errors(
     with pytest.raises(ConfigError) as raised:
         load(
             tmp_path,
-            LLM_PROVIDER="mistral",
-            LLM_MODEL="mistral-small-latest",
-            MISTRAL_API_KEY=key,
-            MISTRAL_BASE_URL=f"http://remote.example.test/{key}",
+            **mistral_env(
+                MISTRAL_API_KEY=key,
+                MISTRAL_BASE_URL=f"http://remote.example.test/{key}",
+            ),
         )
 
     assert key not in str(raised.value)

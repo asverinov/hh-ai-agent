@@ -75,7 +75,7 @@ def test_check_llm_uses_injected_provider_without_browser_or_telegram(
     assert selected.closed is True
 
 
-def test_check_llm_reports_missing_mistral_key_without_traceback_or_secret(
+def test_check_llm_reports_missing_mistral_master_key_without_traceback(
     tmp_path: Path, capsys
 ) -> None:
     result = main.cli(
@@ -86,7 +86,7 @@ def test_check_llm_reports_missing_mistral_key_without_traceback_or_secret(
                     tmp_path,
                     LLM_PROVIDER="mistral",
                     LLM_MODEL="mistral-small-latest",
-                    MISTRAL_API_KEY="",
+                    MISTRAL_KEYS_MASTER_KEY="",
                 )
             ),
             "--profile",
@@ -97,6 +97,32 @@ def test_check_llm_reports_missing_mistral_key_without_traceback_or_secret(
 
     output = capsys.readouterr()
     assert result == 2
-    assert "MISTRAL_API_KEY is required" in output.err
+    assert "MISTRAL_KEYS_MASTER_KEY is required" in output.err
     assert "Traceback" not in output.err
     assert "test-token" not in output.err
+
+
+def test_check_llm_hides_invalid_mistral_master_key(tmp_path: Path, capsys) -> None:
+    invalid_master_key = "not-a-fernet-secret"
+    result = main.cli(
+        [
+            "--env-file",
+            str(
+                write_env(
+                    tmp_path,
+                    LLM_PROVIDER="mistral",
+                    LLM_MODEL="mistral-small-latest",
+                    MISTRAL_KEYS_MASTER_KEY=invalid_master_key,
+                )
+            ),
+            "--profile",
+            str(write_profile(tmp_path)),
+            "--check-llm",
+        ]
+    )
+
+    output = capsys.readouterr()
+    assert result == 2
+    assert "MISTRAL_KEYS_MASTER_KEY" in output.err
+    assert invalid_master_key not in output.err
+    assert "Traceback" not in output.err
