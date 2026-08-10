@@ -451,6 +451,8 @@ def _setup_ollama(current: dict[str, str]) -> dict[str, str]:
 
 
 def _setup_mistral(current: dict[str, str]) -> dict[str, str]:
+    from cryptography.fernet import Fernet
+
     print()
     print(textwrap.dedent(f"""
     {bold('Получение API ключа Mistral:')}
@@ -479,6 +481,8 @@ def _setup_mistral(current: dict[str, str]) -> dict[str, str]:
         "LLM_PROVIDER": "mistral",
         "LLM_MODEL": model,
         "MISTRAL_API_KEY": api_key,
+        "MISTRAL_KEYS_MASTER_KEY": current.get("MISTRAL_KEYS_MASTER_KEY")
+        or Fernet.generate_key().decode(),
         "MISTRAL_BASE_URL": current.get("MISTRAL_BASE_URL", ""),
     }
 
@@ -687,6 +691,12 @@ def step_app_mode(current: dict[str, str]) -> dict[str, str]:
 # Запись файлов
 # ---------------------------------------------------------------------------
 
+def _write_env(content: str) -> None:
+    ENV_PATH.write_text(content, encoding="utf-8")
+    if os.name != "nt":
+        ENV_PATH.chmod(0o600)
+
+
 def build_env(
     telegram: dict[str, str],
     llm: dict[str, str],
@@ -716,6 +726,7 @@ def build_env(
         "",
         "# Mistral",
         f"MISTRAL_API_KEY={llm.get('MISTRAL_API_KEY', '')}",
+        f"MISTRAL_KEYS_MASTER_KEY={llm.get('MISTRAL_KEYS_MASTER_KEY', '')}",
         f"MISTRAL_BASE_URL={llm.get('MISTRAL_BASE_URL', '')}",
         "",
         "# OpenAI-compatible",
@@ -810,7 +821,7 @@ def write_files(env_content: str, profile_content: str) -> None:
     """Записать .env и profile.yaml."""
     section("Сохранение конфигурации")
 
-    ENV_PATH.write_text(env_content, encoding="utf-8")
+    _write_env(env_content)
     ok(f"Записан {bold('.env')}")
 
     PROFILE_PATH.write_text(profile_content, encoding="utf-8")
@@ -1112,13 +1123,13 @@ def _save_env(env: dict[str, str], profile: dict) -> None:
     tg = {k: env.get(k, "") for k in ("TG_BOT_TOKEN", "TG_USER_ID")}
     llm_keys = (
         "LLM_PROVIDER", "LLM_MODEL", "OLLAMA_URL",
-        "MISTRAL_API_KEY", "MISTRAL_BASE_URL",
+        "MISTRAL_API_KEY", "MISTRAL_KEYS_MASTER_KEY", "MISTRAL_BASE_URL",
         "OPENAI_COMPATIBLE_BASE_URL", "OPENAI_COMPATIBLE_API_KEY", "OPENAI_COMPATIBLE_JSON_MODE",
     )
     llm = {k: env.get(k, "") for k in llm_keys}
     mode = {k: env.get(k, "") for k in ("APP_MODE", "ENABLE_REAL_APPLY")}
     content = build_env(tg, llm, mode, env)
-    ENV_PATH.write_text(content, encoding="utf-8")
+    _write_env(content)
     ok(f"Настройки сохранены в {bold('.env')}")
 
 

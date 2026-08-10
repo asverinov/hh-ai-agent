@@ -305,16 +305,19 @@ class TelegramService:
             await self._edit_mistral_message(callback, text, reply_markup=keyboard)
             return
         if parts == ["mk", "check"]:
+            await self._answer_callback(callback, "Проверяем ключи.")
             try:
                 results = await self.mistral_keys.check_all()
             except LLMError as exc:
-                await self._answer_callback(
-                    callback, f"Проверка не выполнена: {exc.category}.", show_alert=True
+                await self._edit_mistral_message(
+                    callback,
+                    f"Проверка не выполнена: {exc.category}.",
+                    acknowledge=False,
                 )
                 return
             text = "\n".join(self._mistral_check_text(result) for result in results)
             await self._edit_mistral_message(
-                callback, text or "Ключей для проверки нет."
+                callback, text or "Ключей для проверки нет.", acknowledge=False
             )
             return
         if len(parts) != 3 or not parts[2].isdecimal():
@@ -339,19 +342,24 @@ class TelegramService:
             )
             return
         if action == "check":
+            await self._answer_callback(callback, "Проверяем ключ.")
             try:
                 result = await self.mistral_keys.check_key(key_id)
             except LLMError as exc:
-                await self._answer_callback(
-                    callback, f"Проверка не выполнена: {exc.category}.", show_alert=True
+                await self._edit_mistral_message(
+                    callback,
+                    f"Проверка не выполнена: {exc.category}.",
+                    acknowledge=False,
                 )
                 return
             if result is None:
-                await self._answer_callback(
-                    callback, "Ключ не найден.", show_alert=True
+                await self._edit_mistral_message(
+                    callback, "Ключ не найден.", acknowledge=False
                 )
                 return
-            await self._edit_mistral_message(callback, self._mistral_check_text(result))
+            await self._edit_mistral_message(
+                callback, self._mistral_check_text(result), acknowledge=False
+            )
             return
         if action == "confirm":
             try:
@@ -395,6 +403,7 @@ class TelegramService:
         text: str,
         *,
         reply_markup: InlineKeyboardMarkup | None = None,
+        acknowledge: bool = True,
     ) -> None:
         if callback.message is None:
             await self._answer_callback(
@@ -404,11 +413,15 @@ class TelegramService:
         try:
             await callback.message.edit_text(text=text, reply_markup=reply_markup)
         except TelegramAPIError:
-            await self._answer_callback(
-                callback, "Действие выполнено, но меню не обновлено.", show_alert=True
-            )
+            if acknowledge:
+                await self._answer_callback(
+                    callback,
+                    "Действие выполнено, но меню не обновлено.",
+                    show_alert=True,
+                )
             return
-        await self._answer_callback(callback, "Готово.")
+        if acknowledge:
+            await self._answer_callback(callback, "Готово.")
 
     @staticmethod
     async def _answer_callback(

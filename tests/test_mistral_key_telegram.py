@@ -257,7 +257,7 @@ def test_add_is_blocked_by_captcha_or_edit_session(tmp_path: Path) -> None:
         assert telegram._mistral_key_input is None
         assert "CAPTCHA" in captcha_callback.answers[-1]["text"]
         telegram._captcha_future.set_result(None)
-        telegram._edit_session = SimpleNamespace()
+        telegram._edit_future = asyncio.get_running_loop().create_future()
         edit_callback = FakeCallback("mk:add")
 
         await telegram._callback_handler(edit_callback)
@@ -265,6 +265,7 @@ def test_add_is_blocked_by_captcha_or_edit_session(tmp_path: Path) -> None:
         assert telegram._mistral_key_input is None
         assert "редактир" in edit_callback.answers[-1]["text"].lower()
         assert keys.calls == []
+        telegram._edit_future.cancel()
 
     asyncio.run(exercise())
 
@@ -383,6 +384,33 @@ def test_check_one_and_check_all_use_manager_api(tmp_path: Path) -> None:
     ]
     assert "····two2" in one.message.edits[-1]["text"]
     assert "2" in all_keys.message.edits[-1]["text"]
+
+
+def test_key_checks_acknowledge_callback_before_network_work(tmp_path: Path) -> None:
+    order: list[str] = []
+
+    class OrderedKeys(FakeMistralKeys):
+        async def check_key(self, key_id: int):
+            order.append("check_key")
+            return await super().check_key(key_id)
+
+        async def check_all(self):
+            order.append("check_all")
+            return await super().check_all()
+
+    class OrderedCallback(FakeCallback):
+        async def answer(self, text: str, *, show_alert: bool = False) -> None:
+            order.append("ack")
+            await super().answer(text, show_alert=show_alert)
+
+    keys = OrderedKeys((key_view(2, "aB7x"),))
+    telegram, _, _ = service(tmp_path, keys=keys)
+
+    asyncio.run(telegram._callback_handler(OrderedCallback("mk:check:2")))
+    assert order[:2] == ["ack", "check_key"]
+    order.clear()
+    asyncio.run(telegram._callback_handler(OrderedCallback("mk:check")))
+    assert order[:2] == ["ack", "check_all"]
 
 
 def test_check_error_exposes_only_safe_category(tmp_path: Path, caplog) -> None:

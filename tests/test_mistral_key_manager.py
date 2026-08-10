@@ -554,6 +554,21 @@ def test_manual_check_updates_state_by_error(
     assert checked.success is False
     assert checked.key.status == expected_status
     assert checked.error_type == error.category
+    assert database.llm_requests_today(NOW) == 0
+
+
+def test_healthcheck_does_not_consume_production_daily_quota(tmp_path: Path) -> None:
+    raw_key = "quota-safe-mistral-key"
+    manager, _, database = make_manager(
+        tmp_path,
+        {raw_key: [response("OK"), response("production")]},
+        keys=(raw_key,),
+        max_requests_per_day=1,
+    )
+
+    assert asyncio.run(manager.check_key(1)).success is True
+    assert database.llm_requests_today(NOW) == 0
+    assert asyncio.run(manager.generate_text(request())).text == "production"
     assert database.llm_requests_today(NOW) == 1
 
 
@@ -571,6 +586,82 @@ def test_check_all_runs_health_checks_sequentially(tmp_path: Path) -> None:
 
     assert [result.success for result in checked] == [True, True]
     assert factory.created_keys == ["first-mistral-key", "second-mistral-key"]
+
+
+def test_check_all_does_not_hold_generation_lock_during_network_io(
+    tmp_path: Path,
+) -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+
+    class CoordinatedAdapter:
+        name = "mistral"
+
+        async def complete(self, llm_request: LLMRequest) -> LLMResponse:
+            if llm_request.operation == "mistral_key_healthcheck":
+                started.set()
+                await release.wait()
+                return response("OK")
+            return response("production")
+
+        async def close(self) -> None:
+            return None
+
+    manager, _, _ = make_manager(
+        tmp_path,
+        {},
+        keys=("first-mistral-key",),
+    )
+    manager._adapter_factory = lambda _raw: CoordinatedAdapter()
+
+    async def scenario() -> None:
+        checking = asyncio.create_task(manager.check_all())
+        await asyncio.wait_for(started.wait(), 0.2)
+        generated = await asyncio.wait_for(manager.generate_text(request()), 0.2)
+        assert generated.text == "production"
+        release.set()
+        await checking
+
+    asyncio.run(scenario())
+
+
+def test_concurrent_state_change_wins_over_stale_healthcheck(tmp_path: Path) -> None:
+    started = asyncio.Event()
+    release = asyncio.Event()
+    raw_key = "concurrent-mistral-key"
+    manager, _, database = make_manager(tmp_path, {}, keys=(raw_key,))
+
+    class DelayedHealthAdapter:
+        name = "mistral"
+
+        async def complete(self, _request: LLMRequest) -> LLMResponse:
+            started.set()
+            await release.wait()
+            return response("OK")
+
+        async def close(self) -> None:
+            return None
+
+    manager._adapter_factory = lambda _raw: DelayedHealthAdapter()
+
+    async def scenario() -> None:
+        checking = asyncio.create_task(manager.check_key(1))
+        await started.wait()
+        assert database.update_mistral_key_state(
+            1,
+            status="disabled",
+            cooldown_until=None,
+            last_checked_at=NOW,
+            last_error_type="authentication",
+            now=NOW,
+        )
+        release.set()
+        result = await checking
+        assert result is not None
+        assert result.key.status == "disabled"
+        assert result.error_type == "authentication"
+
+    asyncio.run(scenario())
 
 
 def test_delete_current_closes_provider_and_clears_current(tmp_path: Path) -> None:

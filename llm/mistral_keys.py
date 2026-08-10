@@ -21,6 +21,7 @@ from llm.errors import (
     LLMAuthenticationError,
     LLMConfigurationError,
     LLMError,
+    LLMInvalidResponseError,
     LLMNoAvailableKeysError,
     LLMPermissionError,
     LLMRateLimitError,
@@ -243,9 +244,12 @@ class MistralKeyManager:
         async with self._lock:
             if self.database.mistral_key_by_hmac(protected.key_hmac, self._now()):
                 raise MistralKeyDuplicateError()
-            error = await self._health_error(raw)
-            if error is not None:
-                raise error
+        error = await self._health_error(raw)
+        if error is not None:
+            raise error
+        async with self._lock:
+            if self.database.mistral_key_by_hmac(protected.key_hmac, self._now()):
+                raise MistralKeyDuplicateError()
             now = self._now()
             key_id = self.database.add_mistral_key(
                 encrypted_key=protected.encrypted_key,
@@ -262,15 +266,39 @@ class MistralKeyManager:
 
     async def check_key(self, key_id: int) -> MistralKeyCheckResult | None:
         async with self._lock:
-            return await self._check_key_locked(key_id)
+            row = self.database.mistral_key(key_id, self._now())
+            if row is None:
+                return None
+            raw = self._cipher.reveal(row.encrypted_key)
+            state = (
+                row.status,
+                row.cooldown_until,
+                row.last_checked_at,
+                row.last_error_type,
+            )
+        error = await self._health_error(raw)
+        async with self._lock:
+            current = self.database.mistral_key(key_id, self._now())
+            if current is None:
+                return None
+            current_state = (
+                current.status,
+                current.cooldown_until,
+                current.last_checked_at,
+                current.last_error_type,
+            )
+            if current_state != state:
+                return MistralKeyCheckResult(
+                    key=self._view(current),
+                    success=current.status == "ready",
+                    error_type=current.last_error_type,
+                )
+            return await self._record_check_locked(current, error)
 
-    async def _check_key_locked(
-        self, key_id: int
-    ) -> MistralKeyCheckResult | None:
-        row = self.database.mistral_key(key_id, self._now())
-        if row is None:
-            return None
-        error = await self._health_error(self._cipher.reveal(row.encrypted_key))
+    async def _record_check_locked(
+        self, row: MistralKeyRow, error: LLMError | None
+    ) -> MistralKeyCheckResult:
+        key_id = row.id
         now = self._now()
         if error is None:
             status = "ready"
@@ -318,12 +346,13 @@ class MistralKeyManager:
 
     async def check_all(self) -> tuple[MistralKeyCheckResult, ...]:
         async with self._lock:
-            results: list[MistralKeyCheckResult] = []
-            for key in self.database.mistral_keys(self._now()):
-                result = await self._check_key_locked(key.id)
-                if result is not None:
-                    results.append(result)
-            return tuple(results)
+            key_ids = tuple(key.id for key in self.database.mistral_keys(self._now()))
+        results: list[MistralKeyCheckResult] = []
+        for key_id in key_ids:
+            result = await self.check_key(key_id)
+            if result is not None:
+                results.append(result)
+        return tuple(results)
 
     async def delete_key(self, key_id: int) -> bool:
         async with self._lock:
@@ -337,21 +366,15 @@ class MistralKeyManager:
             await self._close_current()
 
     async def _health_error(self, raw: str) -> LLMError | None:
-        provider = ManagedLLMProvider(
-            self._adapter_factory(raw),
-            self.database,
-            max_retries=0,
-            max_rate_limit_retries=0,
-            max_requests_per_day=self.settings.max_requests_per_day,
-            sleep=self._sleep,
-            now_factory=self._now,
-        )
+        adapter = self._adapter_factory(raw)
         try:
-            await provider.generate_text(self._health_request())
+            response = await adapter.complete(self._health_request())
+            if not response.text.strip():
+                raise LLMInvalidResponseError()
         except LLMError as exc:
             return exc
         finally:
-            await self._close_provider(provider)
+            await self._close_provider(adapter)
         return None
 
     def _health_request(self) -> LLMRequest:
@@ -373,7 +396,9 @@ class MistralKeyManager:
             await self._close_provider(provider)
 
     @staticmethod
-    async def _close_provider(provider: ManagedLLMProvider) -> None:
+    async def _close_provider(
+        provider: ManagedLLMProvider | ProviderAdapter,
+    ) -> None:
         try:
             await provider.close()
         except Exception as exc:

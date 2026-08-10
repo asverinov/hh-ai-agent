@@ -54,6 +54,9 @@ class FakeTelegram:
     async def notify(self, text: str):
         self.notifications.append(text)
 
+    async def notify_analysis_failed(self, title: str, url: str, error_type: str):
+        self.notifications.append(error_type)
+
     async def request_captcha(self, screenshot, title: str, timeout_seconds: int):
         return None
 
@@ -222,7 +225,7 @@ def test_browser_read_error_is_persisted_as_apply_failed(tmp_path: Path) -> None
     assert "navigation failed" in vacancy.error_text
 
 
-def test_llm_failure_rejects_vacancy_without_requesting_approval(
+def test_llm_failure_records_analysis_failure_without_requesting_approval(
     tmp_path: Path,
 ) -> None:
     app_settings = settings(tmp_path, "approval")
@@ -252,7 +255,8 @@ def test_llm_failure_rejects_vacancy_without_requesting_approval(
     )
 
     vacancy = database.get("job-1")
-    assert vacancy.status is VacancyStatus.REJECTED_BY_LLM
+    assert vacancy.status is VacancyStatus.ANALYSIS_FAILED
+    assert vacancy.error_text == "authentication"
     assert vacancy.cover_letter == ""
     assert telegram.previews == []
 
