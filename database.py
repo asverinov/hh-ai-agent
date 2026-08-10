@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import secrets
 import sqlite3
 from dataclasses import dataclass
@@ -46,6 +47,26 @@ class Vacancy:
     applied_at: str | None
     approver_id: int | None
     error_text: str
+
+
+@dataclass(frozen=True)
+class SearchRun:
+    id: int
+    started_at: str
+    finished_at: str
+    state: str
+    query_count: int
+    found_results: int
+    new_vacancies: int
+    duplicates: int
+    rejected_by_filter: int
+    rejected_by_llm: int
+    telegram_cards: int
+    error_count: int
+    rejection_reasons: dict[str, int]
+    error_reasons: dict[str, int]
+    last_safe_error: str
+    circuit_reason: str
 
 
 @dataclass(frozen=True)
@@ -178,6 +199,30 @@ class Database:
             )
             connection.execute(
                 "CREATE INDEX IF NOT EXISTS llm_requests_provider_idx ON llm_requests(provider)"
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS search_runs (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    started_at TEXT NOT NULL,
+                    finished_at TEXT NOT NULL,
+                    state TEXT NOT NULL CHECK (
+                        state IN ('completed', 'failed', 'paused_by_circuit_breaker')
+                    ),
+                    query_count INTEGER NOT NULL DEFAULT 0,
+                    found_results INTEGER NOT NULL DEFAULT 0,
+                    new_vacancies INTEGER NOT NULL DEFAULT 0,
+                    duplicates INTEGER NOT NULL DEFAULT 0,
+                    rejected_by_filter INTEGER NOT NULL DEFAULT 0,
+                    rejected_by_llm INTEGER NOT NULL DEFAULT 0,
+                    telegram_cards INTEGER NOT NULL DEFAULT 0,
+                    error_count INTEGER NOT NULL DEFAULT 0,
+                    rejection_reasons_json TEXT NOT NULL DEFAULT '{}',
+                    error_reasons_json TEXT NOT NULL DEFAULT '{}',
+                    last_safe_error TEXT NOT NULL DEFAULT '',
+                    circuit_reason TEXT NOT NULL DEFAULT ''
+                )
+                """
             )
             columns = {
                 row[1] for row in connection.execute("PRAGMA table_info(vacancies)")
@@ -319,6 +364,18 @@ class Database:
                 connection.execute("SELECT * FROM vacancies WHERE id = ?", (job_id,)).fetchone()
             )
 
+    def unprocessed_discovered(self) -> list[Vacancy]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM vacancies
+                WHERE status = ? AND llm_decision IS NULL
+                ORDER BY discovered_at
+                """,
+                (VacancyStatus.DISCOVERED.value,),
+            ).fetchall()
+            return [self._vacancy(row) for row in rows]
+
     def transition(
         self,
         job_id: str,
@@ -355,7 +412,6 @@ class Database:
         llm_reason: str,
         confidence: float,
         now: datetime,
-        ttl_minutes: int,
     ) -> bool:
         with self._connect() as connection:
             cursor = connection.execute(
@@ -363,7 +419,7 @@ class Database:
                 UPDATE vacancies SET
                     status = ?, cover_letter = ?, llm_decision = ?,
                     llm_reason = ?, confidence = ?, approval_requested_at = ?,
-                    approval_expires_at = ?, error_text = ''
+                    approval_expires_at = NULL, error_text = ''
                 WHERE id = ? AND status = ?
                 """,
                 (
@@ -373,7 +429,6 @@ class Database:
                     llm_reason,
                     confidence,
                     _iso(now),
-                    _iso(now + timedelta(minutes=ttl_minutes)),
                     job_id,
                     VacancyStatus.DISCOVERED.value,
                 ),
@@ -413,6 +468,7 @@ class Database:
         telegram_user_id: int,
         expected_user_id: int,
         now: datetime,
+        ttl_minutes: int = 30,
     ) -> str | None:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
@@ -423,26 +479,19 @@ class Database:
                 return None
             if telegram_user_id != expected_user_id:
                 return None
-            if not row["approval_expires_at"] or row["approval_expires_at"] <= _iso(now):
-                connection.execute(
-                    "UPDATE vacancies SET status = ? WHERE id = ? AND status = ?",
-                    (
-                        VacancyStatus.EXPIRED.value,
-                        job_id,
-                        VacancyStatus.PENDING_APPROVAL.value,
-                    ),
-                )
-                return None
             permit = secrets.token_urlsafe(32)
             permit_hash = hashlib.sha256(permit.encode()).hexdigest()
             cursor = connection.execute(
                 """
-                UPDATE vacancies SET status = ?, approved_at = ?, approver_id = ?, permit_hash = ?
+                UPDATE vacancies SET
+                    status = ?, approved_at = ?, approval_expires_at = ?,
+                    approver_id = ?, permit_hash = ?
                 WHERE id = ? AND status = ?
                 """,
                 (
                     VacancyStatus.APPROVED.value,
                     _iso(now),
+                    _iso(now + timedelta(minutes=ttl_minutes)),
                     telegram_user_id,
                     permit_hash,
                     job_id,
@@ -736,17 +785,18 @@ class Database:
             ).fetchone()
             return {key: int(row[key]) for key in row.keys()}
 
-    def expire_pending(self, now: datetime) -> int:
+    def expire_approved(self, now: datetime) -> int:
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             cursor = connection.execute(
                 """
                 UPDATE vacancies SET status = ?, permit_hash = NULL
-                WHERE status IN (?, ?) AND approval_expires_at <= ?
+                WHERE status = ?
+                    AND approval_expires_at IS NOT NULL
+                    AND approval_expires_at <= ?
                 """,
                 (
                     VacancyStatus.EXPIRED.value,
-                    VacancyStatus.PENDING_APPROVAL.value,
                     VacancyStatus.APPROVED.value,
                     _iso(now),
                 ),
@@ -771,6 +821,101 @@ class Database:
             ):
                 counts[row["status"]] = row["count"]
         return counts
+
+    def save_search_run(
+        self,
+        *,
+        started_at: datetime,
+        finished_at: datetime,
+        state: str,
+        query_count: int,
+        found_results: int,
+        new_vacancies: int,
+        duplicates: int,
+        rejected_by_filter: int,
+        rejected_by_llm: int,
+        telegram_cards: int,
+        error_count: int,
+        rejection_reasons: dict[str, int],
+        error_reasons: dict[str, int],
+        last_safe_error: str = "",
+        circuit_reason: str = "",
+    ) -> int:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                INSERT INTO search_runs (
+                    started_at, finished_at, state, query_count, found_results,
+                    new_vacancies, duplicates, rejected_by_filter, rejected_by_llm,
+                    telegram_cards, error_count, rejection_reasons_json,
+                    error_reasons_json, last_safe_error, circuit_reason
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    _iso(started_at),
+                    _iso(finished_at),
+                    state,
+                    query_count,
+                    found_results,
+                    new_vacancies,
+                    duplicates,
+                    rejected_by_filter,
+                    rejected_by_llm,
+                    telegram_cards,
+                    error_count,
+                    json.dumps(rejection_reasons, ensure_ascii=False, sort_keys=True),
+                    json.dumps(error_reasons, ensure_ascii=False, sort_keys=True),
+                    last_safe_error,
+                    circuit_reason,
+                ),
+            )
+            return int(cursor.lastrowid)
+
+    def latest_search_run(self) -> SearchRun | None:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT * FROM search_runs ORDER BY id DESC LIMIT 1"
+            ).fetchone()
+        if row is None:
+            return None
+        return SearchRun(
+            id=row["id"],
+            started_at=row["started_at"],
+            finished_at=row["finished_at"],
+            state=row["state"],
+            query_count=row["query_count"],
+            found_results=row["found_results"],
+            new_vacancies=row["new_vacancies"],
+            duplicates=row["duplicates"],
+            rejected_by_filter=row["rejected_by_filter"],
+            rejected_by_llm=row["rejected_by_llm"],
+            telegram_cards=row["telegram_cards"],
+            error_count=row["error_count"],
+            rejection_reasons=json.loads(row["rejection_reasons_json"]),
+            error_reasons=json.loads(row["error_reasons_json"]),
+            last_safe_error=row["last_safe_error"],
+            circuit_reason=row["circuit_reason"],
+        )
+
+    def record_search_run_error(self, run_id: int, reason: str) -> bool:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT error_reasons_json FROM search_runs WHERE id = ?", (run_id,)
+            ).fetchone()
+            if row is None:
+                return False
+            reasons = json.loads(row["error_reasons_json"])
+            reasons[reason] = reasons.get(reason, 0) + 1
+            cursor = connection.execute(
+                """
+                UPDATE search_runs
+                SET error_count = error_count + 1,
+                    error_reasons_json = ?, last_safe_error = ?
+                WHERE id = ?
+                """,
+                (json.dumps(reasons, ensure_ascii=False, sort_keys=True), reason, run_id),
+            )
+            return cursor.rowcount == 1
 
     def is_message_processed(self, message_id: str) -> bool:
         with self._connect() as connection:

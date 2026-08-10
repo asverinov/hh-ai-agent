@@ -84,6 +84,7 @@ class ApprovalService:
             telegram_user_id,
             self.settings.tg_user_id,
             self.now_factory(),
+            self.settings.approval_ttl_minutes,
         )
         if permit is None:
             logger.warning("application_blocked job_id=%s reason=approval_invalid", job_id)

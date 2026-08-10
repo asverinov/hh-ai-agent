@@ -142,7 +142,6 @@ def pending(database: Database, job_id: str = "job-1", letter: str = "Letter") -
         llm_reason="Relevant",
         confidence=0.9,
         now=NOW,
-        ttl_minutes=30,
     )
 
 
@@ -387,7 +386,7 @@ def test_permission_is_rechecked_for_expiry_immediately_before_submit(
         database,
         ApprovalGuard(app_settings, database, now_factory=lambda: NOW + timedelta(minutes=29)),
         sleep=no_sleep,
-        now_factory=lambda: NOW + timedelta(minutes=31),
+        now_factory=lambda: NOW + timedelta(minutes=60),
     )
 
     sent = asyncio.run(

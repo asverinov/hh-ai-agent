@@ -31,6 +31,9 @@ PRIVATE_REPLY = "This bot is private."
 @dataclass
 class AgentControl:
     paused: bool = False
+    circuit_reason: str = ""
+    consecutive_search_errors: int = 0
+    next_run_at: datetime | None = None
     wake_event: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
 
 
@@ -68,10 +71,14 @@ class TelegramService:
             return "Personal HH assistant is ready. Use /status to inspect it."
         if name == "pause":
             self.control.paused = True
+            self.control.next_run_at = None
             logger.info("agent_paused")
             return "Agent paused."
         if name == "resume":
             self.control.paused = False
+            self.control.circuit_reason = ""
+            self.control.consecutive_search_errors = 0
+            self.control.next_run_at = None
             self.control.wake_event.set()
             logger.info("agent_resumed")
             return "Agent resumed."
@@ -97,6 +104,8 @@ class TelegramService:
                 for status, count in self.database.stats().items()
                 if count
             ) or "No vacancies recorded."
+        if name == "diagnostics":
+            return self._diagnostics()
         if name == "cancel":
             if self._captcha_future and not self._captcha_future.done():
                 self._captcha_future.set_result(None)
@@ -105,8 +114,62 @@ class TelegramService:
             return "Current input request cancelled."
         return "Unknown command."
 
+    def _diagnostics(self) -> str:
+        run = self.database.latest_search_run()
+        if run is None:
+            return "No search diagnostics recorded."
+        started = datetime.fromisoformat(run.started_at)
+        finished = datetime.fromisoformat(run.finished_at)
+        reasons = ", ".join(
+            f"{reason}={count}"
+            for reason, count in sorted(run.rejection_reasons.items())
+        ) or "нет"
+        errors = ", ".join(
+            f"{reason}={count}"
+            for reason, count in sorted(run.error_reasons.items())
+        ) or "нет"
+        breaker = (
+            f"open ({self.control.circuit_reason})"
+            if self.control.circuit_reason
+            else "closed"
+        )
+        if self.control.paused:
+            next_run = "paused"
+        elif self.control.next_run_at is None:
+            next_run = "после текущего цикла"
+        else:
+            next_run = self.control.next_run_at.astimezone().strftime(
+                "%Y-%m-%d %H:%M:%S"
+            )
+        return (
+            f"последний цикл: {started.astimezone():%Y-%m-%d %H:%M:%S}\n"
+            f"состояние: {run.state}\n"
+            f"длительность: {int((finished - started).total_seconds())} с\n"
+            f"запросы: {run.query_count}\n"
+            f"найдено: {run.found_results}\n"
+            f"новые: {run.new_vacancies}\n"
+            f"дубли: {run.duplicates}\n"
+            f"отклонено — фильтр: {run.rejected_by_filter}, LLM: {run.rejected_by_llm}\n"
+            f"причины: {reasons}\n"
+            f"карточки: {run.telegram_cards}\n"
+            f"ошибки: {run.error_count} ({errors})\n"
+            f"последняя ошибка: {run.last_safe_error or 'нет'}\n"
+            f"breaker: {breaker}\n"
+            f"last breaker: {run.circuit_reason or 'none'}\n"
+            f"следующий запуск: {next_run}"
+        )
+
     def _register_handlers(self) -> None:
-        for name in ("start", "status", "pause", "resume", "pending", "stats", "cancel"):
+        for name in (
+            "start",
+            "status",
+            "pause",
+            "resume",
+            "pending",
+            "stats",
+            "diagnostics",
+            "cancel",
+        ):
             self.dispatcher.message.register(self._command_handler, Command(name))
         self.dispatcher.callback_query.register(
             self._callback_handler,
