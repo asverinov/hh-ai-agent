@@ -8,7 +8,7 @@ from pathlib import Path
 from ai_analyzer import SuitabilityResult, VacancyAnalyzer
 from config import load_settings
 from database import Database, VacancyStatus
-from hh_client import PageState, VacancyDetails, VacancySummary
+from hh_client import CompanyDetails, PageState, VacancyDetails, VacancySummary
 from llm.errors import LLMAuthenticationError
 from llm.managed import ManagedLLMProvider
 from llm.providers.fake import FakeProvider
@@ -29,11 +29,17 @@ class FakeHHClient:
     async def read_vacancy(self, summary, captcha_solver=None):
         return self.details
 
+    async def read_company_details(self, company_url: str):
+        return CompanyDetails(4.7, 128)
+
 
 class FakeAnalyzer:
     async def assess(self, title: str, description: str) -> SuitabilityResult:
         return SuitabilityResult(
-            suitable=True, confidence=0.91, reason="Relevant work"
+            suitable=True,
+            confidence=0.91,
+            reason="Relevant work",
+            fit_points=[{"category": "Навыки", "text": "Python"}],
         )
 
     async def generate_cover_letter(self, title: str, description: str) -> str:
@@ -50,6 +56,9 @@ class FakeTelegram:
 
     async def notify(self, text: str):
         self.notifications.append(text)
+
+    async def notify_analysis_failed(self, title: str, url: str, error_type: str):
+        self.notifications.append(error_type)
 
     async def request_captcha(self, screenshot, title: str, timeout_seconds: int):
         return None
@@ -87,6 +96,8 @@ def test_dry_run_records_and_previews_without_pending_actions(tmp_path: Path) ->
     vacancy = database.get("job-1")
     assert vacancy.status is VacancyStatus.DISCOVERED
     assert vacancy.cover_letter == "Safe local-profile letter"
+    assert vacancy.fit_summary.startswith("Навыки: Python")
+    assert vacancy.company_rating == 4.7
     assert telegram.previews == [("job-1", False)]
 
 
@@ -141,7 +152,7 @@ def test_browser_read_error_is_persisted_as_apply_failed(tmp_path: Path) -> None
     assert "navigation failed" in vacancy.error_text
 
 
-def test_llm_failure_rejects_vacancy_without_requesting_approval(
+def test_llm_failure_records_analysis_failure_without_requesting_approval(
     tmp_path: Path,
 ) -> None:
     app_settings = settings(tmp_path, "approval")
@@ -171,7 +182,8 @@ def test_llm_failure_rejects_vacancy_without_requesting_approval(
     )
 
     vacancy = database.get("job-1")
-    assert vacancy.status is VacancyStatus.REJECTED_BY_LLM
+    assert vacancy.status is VacancyStatus.ANALYSIS_FAILED
+    assert vacancy.error_text == "authentication"
     assert vacancy.cover_letter == ""
     assert telegram.previews == []
 

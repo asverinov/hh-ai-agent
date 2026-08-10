@@ -3,6 +3,11 @@ from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
+from aiogram.exceptions import TelegramBadRequest, TelegramNetworkError
+from aiogram.methods import SendRichMessage
+from aiogram.types import InputRichBlockDetails, InputRichMessage
+
 from config import load_settings
 from database import Database
 from tests.test_config import VALID_ENV, write_profile
@@ -13,8 +18,15 @@ NOW = datetime(2026, 7, 26, 9, 0, tzinfo=UTC)
 
 
 class FakeBot:
-    def __init__(self):
+    def __init__(self, rich_error: Exception | None = None):
         self.messages: list[dict] = []
+        self.rich_messages: list[dict] = []
+        self.rich_error = rich_error
+
+    async def send_rich_message(self, **kwargs):
+        if self.rich_error:
+            raise self.rich_error
+        self.rich_messages.append(kwargs)
 
     async def send_message(self, **kwargs):
         self.messages.append(kwargs)
@@ -28,7 +40,11 @@ class FakeApprovalService:
         raise AssertionError("skip must not be called by command tests")
 
 
-def service(tmp_path: Path, app_mode: str = "dry_run"):
+def service(
+    tmp_path: Path,
+    app_mode: str = "dry_run",
+    rich_error: Exception | None = None,
+):
     settings = load_settings(
         profile_path=write_profile(tmp_path),
         environ={**VALID_ENV, "TG_USER_ID": "42", "APP_MODE": app_mode},
@@ -37,7 +53,7 @@ def service(tmp_path: Path, app_mode: str = "dry_run"):
     database = Database(settings.database_path)
     database.init()
     control = AgentControl()
-    bot = FakeBot()
+    bot = FakeBot(rich_error)
     telegram = TelegramService(
         settings,
         database,
@@ -54,16 +70,19 @@ def add_preview_vacancy(database: Database) -> None:
         job_id="job-1",
         title="Python <Developer>",
         company="Example & Co",
+        company_url="https://hh.ru/employer/123",
         url="https://example.com/vacancy/job-1",
         description_hash="hash",
         search_query="Python",
         discovered_at=NOW,
     )
+    assert database.store_company_details("job-1", rating=4.7, reviews_count=128)
     assert database.request_approval(
         job_id="job-1",
         cover_letter="Hello <team>",
         llm_decision=True,
         llm_reason="Relevant & local",
+        fit_summary="Опыт: backend-сервисы.\nНавыки: Python.",
         confidence=0.87,
         now=NOW,
         ttl_minutes=30,
@@ -94,16 +113,61 @@ def test_pause_resume_and_status_use_live_state(tmp_path: Path) -> None:
     assert control.wake_event.is_set()
 
 
-def test_dry_run_preview_has_no_action_buttons_and_escapes_html(tmp_path: Path) -> None:
+def test_dry_run_preview_uses_rich_card_with_company_details(tmp_path: Path) -> None:
     telegram, database, _, bot = service(tmp_path, "dry_run")
     add_preview_vacancy(database)
 
     asyncio.run(telegram.send_preview(database.get("job-1"), include_actions=False))
 
-    message = bot.messages[0]
+    assert bot.messages == []
+    message = bot.rich_messages[0]
     assert message["reply_markup"] is None
-    assert "Python &lt;Developer&gt;" in message["text"]
-    assert "Example &amp; Co" in message["text"]
+    details = next(
+        block
+        for block in message["rich_message"].blocks
+        if isinstance(block, InputRichBlockDetails)
+        and block.summary == "Компания"
+    )
+    rendered = repr(details.blocks)
+    assert "Example & Co" in rendered
+    assert "★ 4,7/5 · 128 отзывов" in rendered
+    assert "Опыт" in repr(message["rich_message"].blocks)
+
+
+def rich_error(error_type: type[Exception], message: str) -> Exception:
+    method = SendRichMessage(
+        chat_id=42,
+        rich_message=InputRichMessage(html="test"),
+    )
+    return error_type(method=method, message=message)
+
+
+def test_unsupported_rich_message_falls_back_to_escaped_html(tmp_path: Path) -> None:
+    telegram, database, _, bot = service(
+        tmp_path,
+        rich_error=rich_error(TelegramBadRequest, "method is not supported"),
+    )
+    add_preview_vacancy(database)
+
+    asyncio.run(telegram.send_preview(database.get("job-1"), include_actions=False))
+
+    assert len(bot.messages) == 1
+    assert "Python &lt;Developer&gt;" in bot.messages[0]["text"]
+    assert "Example &amp; Co" in bot.messages[0]["text"]
+    assert "<b>Опыт:</b> backend-сервисы." in bot.messages[0]["text"]
+
+
+def test_transport_error_does_not_send_duplicate_fallback(tmp_path: Path) -> None:
+    telegram, database, _, bot = service(
+        tmp_path,
+        rich_error=rich_error(TelegramNetworkError, "network disconnected"),
+    )
+    add_preview_vacancy(database)
+
+    with pytest.raises(TelegramNetworkError):
+        asyncio.run(telegram.send_preview(database.get("job-1"), include_actions=False))
+
+    assert bot.messages == []
 
 
 def test_approval_preview_has_apply_and_skip_buttons(tmp_path: Path) -> None:
@@ -112,7 +176,7 @@ def test_approval_preview_has_apply_and_skip_buttons(tmp_path: Path) -> None:
 
     asyncio.run(telegram.send_preview(database.get("job-1"), include_actions=True))
 
-    buttons = bot.messages[0]["reply_markup"].inline_keyboard[0]
+    buttons = bot.rich_messages[0]["reply_markup"].inline_keyboard[0]
     assert [button.text for button in buttons] == ["Откликнуться", "Пропустить"]
     assert [button.callback_data for button in buttons] == ["apply:job-1", "skip:job-1"]
 

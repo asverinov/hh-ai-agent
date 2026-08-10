@@ -14,6 +14,7 @@ from approval import ApprovalGuard, ApprovalService
 from browser_backend import BrowserLaunchError, create_browser_backend
 from config import ConfigError, Settings, load_settings
 from database import Database, VacancyStatus
+from fit_summary import normalize_fit_summary
 from hh_client import HHClient, PageState, VacancySummary
 from llm.base import LLMProvider
 from llm.errors import LLMError
@@ -50,6 +51,7 @@ async def process_vacancy(
         job_id=summary.id,
         title=summary.title,
         company=details.company,
+        company_url=details.company_url,
         url=summary.url,
         description_hash=description_hash,
         search_query=summary.search_query,
@@ -108,6 +110,12 @@ async def process_vacancy(
         logger.info("vacancy_rejected job_id=%s source=llm", summary.id)
         return
 
+    fit_summary = normalize_fit_summary(suitability.fit_points)
+    company = await hh_client.read_company_details(details.company_url)
+    database.store_company_details(
+        summary.id, rating=company.rating, reviews_count=company.reviews_count
+    )
+
     letter = await analyzer.generate_cover_letter(summary.title, details.description)
     if not letter.strip():
         database.transition(
@@ -126,6 +134,7 @@ async def process_vacancy(
             llm_decision=True,
             llm_reason=suitability.reason,
             confidence=suitability.confidence,
+            fit_summary=fit_summary,
         )
         await telegram.send_preview(database.get(summary.id), include_actions=False)
         return
@@ -136,6 +145,7 @@ async def process_vacancy(
         llm_decision=True,
         llm_reason=suitability.reason,
         confidence=suitability.confidence,
+        fit_summary=fit_summary,
         now=now,
         ttl_minutes=settings.approval_ttl_minutes,
     ):

@@ -49,6 +49,45 @@ class FakeContext:
         return self.page
 
 
+class TextLocator(FakeLocator):
+    def __init__(self, text: str = "", href: str | None = None):
+        super().__init__(bool(text))
+        self.text = text
+        self.href = href
+
+    async def inner_text(self) -> str:
+        return self.text
+
+    async def get_attribute(self, name: str) -> str | None:
+        return self.href if name == "href" else None
+
+
+class VacancyPage(FakePage):
+    def locator(self, selector: str) -> TextLocator:
+        values = {
+            '[data-qa="vacancy-description"]': "Описание вакансии.",
+            '[data-qa="vacancy-company-name"]': "Компания",
+        }
+        return TextLocator(
+            values.get(selector, ""),
+            "/employer/123?hhtmFrom=vacancy"
+            if selector == '[data-qa="vacancy-company-name"]'
+            else None,
+        )
+
+
+class EmployerPage(FakePage):
+    def __init__(self, rating: str = "", reviews: str = ""):
+        super().__init__()
+        self.values = {
+            '[data-qa="employer-review-small-widget-total-rating"]': rating,
+            '[data-qa="employer-review-small-widget-review-count-action"]': reviews,
+        }
+
+    def locator(self, selector: str) -> TextLocator:
+        return TextLocator(self.values.get(selector, ""))
+
+
 class FailingContext:
     async def new_page(self):
         raise RuntimeError("page creation failed")
@@ -161,6 +200,73 @@ def test_page_creation_failure_reports_network_error(tmp_path: Path) -> None:
 
     assert result.state is PageState.NETWORK_ERROR
     assert "page creation failed" in result.error
+
+
+def test_read_vacancy_collects_safe_company_url(tmp_path: Path) -> None:
+    settings = replace(
+        load_settings(profile_path=write_profile(tmp_path), environ=VALID_ENV),
+        database_path=tmp_path / "agent.db",
+        min_seconds_between_actions=0,
+    )
+    database = Database(settings.database_path)
+    database.init()
+    client = HHClient(
+        FakeContext(VacancyPage()),
+        settings,
+        database,
+        ApprovalGuard(settings, database),
+        sleep=lambda _: asyncio.sleep(0),
+    )
+
+    result = asyncio.run(
+        client.read_vacancy(
+            VacancySummary("job-1", "Developer", "https://hh.ru/vacancy/1", "Python")
+        )
+    )
+
+    assert result.company_url == "https://hh.ru/employer/123"
+
+
+def test_read_company_details_parses_rating_and_review_count(tmp_path: Path) -> None:
+    settings = replace(
+        load_settings(profile_path=write_profile(tmp_path), environ=VALID_ENV),
+        database_path=tmp_path / "agent.db",
+        min_seconds_between_actions=0,
+    )
+    database = Database(settings.database_path)
+    database.init()
+    client = HHClient(
+        FakeContext(EmployerPage("3,4", "14 отзывов")),
+        settings,
+        database,
+        ApprovalGuard(settings, database),
+        sleep=lambda _: asyncio.sleep(0),
+    )
+
+    result = asyncio.run(client.read_company_details("https://hh.ru/employer/123"))
+
+    assert result.rating == 3.4
+    assert result.reviews_count == 14
+
+
+def test_read_company_details_rejects_non_hh_url(tmp_path: Path) -> None:
+    settings = replace(
+        load_settings(profile_path=write_profile(tmp_path), environ=VALID_ENV),
+        database_path=tmp_path / "agent.db",
+    )
+    database = Database(settings.database_path)
+    database.init()
+    client = HHClient(
+        FakeContext(EmployerPage("5", "100 отзывов")),
+        settings,
+        database,
+        ApprovalGuard(settings, database),
+    )
+
+    result = asyncio.run(client.read_company_details("https://example.com/employer/1"))
+
+    assert result.rating is None
+    assert result.reviews_count is None
 
 
 def test_login_check_retries_temporary_navigation_errors(tmp_path: Path) -> None:
