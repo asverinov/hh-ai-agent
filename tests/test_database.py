@@ -94,6 +94,169 @@ def test_duplicate_discovery_is_rejected(tmp_path: Path) -> None:
     assert database.get("job-1").title == "Python developer"
 
 
+def test_analysis_failure_retry_is_due_once_per_cycle_and_stops_after_three(
+    tmp_path: Path,
+) -> None:
+    database = make_database(tmp_path)
+    discover(database, letter="")
+    retry_delay = timedelta(minutes=30)
+
+    assert database.mark_analysis_failed(
+        "job-1",
+        error_type="timeout",
+        now=NOW,
+        retry_after=retry_delay,
+        max_attempts=3,
+    )
+    first_failure = database.get("job-1")
+    assert first_failure.status is VacancyStatus.ANALYSIS_FAILED
+    assert first_failure.llm_decision is None
+    assert first_failure.error_text == "timeout"
+    assert first_failure.analysis_retry_count == 1
+    assert first_failure.analysis_next_retry_at == (
+        NOW + timedelta(minutes=30)
+    ).isoformat()
+    assert database.requeue_due_analysis_failures(
+        NOW + timedelta(minutes=29), max_attempts=3
+    ) == 0
+
+    assert database.requeue_due_analysis_failures(
+        NOW + timedelta(minutes=30), max_attempts=3
+    ) == 1
+    assert database.get("job-1").status is VacancyStatus.DISCOVERED
+
+    assert database.mark_analysis_failed(
+        "job-1",
+        error_type="transient_server",
+        now=NOW + timedelta(minutes=30),
+        retry_after=retry_delay,
+        max_attempts=3,
+    )
+    assert database.get("job-1").analysis_retry_count == 2
+    assert database.requeue_due_analysis_failures(
+        NOW + timedelta(minutes=60), max_attempts=3
+    ) == 1
+
+    assert database.mark_analysis_failed(
+        "job-1",
+        error_type="timeout",
+        now=NOW + timedelta(minutes=60),
+        retry_after=retry_delay,
+        max_attempts=3,
+    )
+    exhausted = database.get("job-1")
+    assert exhausted.status is VacancyStatus.ANALYSIS_FAILED
+    assert exhausted.analysis_retry_count == 3
+    assert exhausted.analysis_next_retry_at is None
+    assert database.requeue_due_analysis_failures(
+        NOW + timedelta(days=1), max_attempts=3
+    ) == 0
+
+
+def test_status_migration_preserves_vacancy_and_adds_retry_state(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "legacy.db"
+    statuses = ", ".join(
+        f"'{status.value}'"
+        for status in VacancyStatus
+        if status is not VacancyStatus.ANALYSIS_FAILED
+    )
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            f"""
+            CREATE TABLE vacancies (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                company TEXT NOT NULL DEFAULT '',
+                url TEXT NOT NULL,
+                description_hash TEXT NOT NULL DEFAULT '',
+                search_query TEXT NOT NULL DEFAULT '',
+                llm_decision INTEGER,
+                llm_reason TEXT NOT NULL DEFAULT '',
+                confidence REAL,
+                cover_letter TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL CHECK (status IN ({statuses})),
+                discovered_at TEXT NOT NULL,
+                approval_requested_at TEXT,
+                approval_expires_at TEXT,
+                approved_at TEXT,
+                applied_at TEXT,
+                approver_id INTEGER,
+                permit_hash TEXT,
+                error_text TEXT NOT NULL DEFAULT '',
+                applying_at TEXT,
+                submit_attempted_at TEXT
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO vacancies (
+                id, title, company, url, description_hash, search_query,
+                status, discovered_at, approval_requested_at,
+                approval_expires_at, approved_at, applied_at, approver_id,
+                permit_hash, error_text, applying_at, submit_attempted_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "legacy-job",
+                "Legacy developer",
+                "Legacy Co",
+                "https://example.com/legacy",
+                "legacy-hash",
+                "Python",
+                VacancyStatus.DISCOVERED.value,
+                "2026-07-20T09:00:00+00:00",
+                "requested",
+                "expires",
+                "approved",
+                "applied",
+                42,
+                "permit",
+                "legacy error",
+                "applying",
+                "submitted",
+            ),
+        )
+
+    database = Database(path)
+    database.init()
+
+    vacancy = database.get("legacy-job")
+    assert vacancy.title == "Legacy developer"
+    assert vacancy.approval_requested_at == "requested"
+    assert vacancy.approval_expires_at == "expires"
+    assert vacancy.approved_at == "approved"
+    assert vacancy.applying_at == "applying"
+    assert vacancy.submit_attempted_at == "submitted"
+    assert vacancy.applied_at == "applied"
+    assert vacancy.approver_id == 42
+    assert vacancy.error_text == "legacy error"
+    assert vacancy.analysis_retry_count == 0
+    assert vacancy.analysis_next_retry_at is None
+
+
+def test_existing_analysis_failure_becomes_due_after_retry_migration(
+    tmp_path: Path,
+) -> None:
+    database = make_database(tmp_path)
+    discover(database, letter="")
+    assert database.transition(
+        "job-1",
+        VacancyStatus.DISCOVERED,
+        VacancyStatus.ANALYSIS_FAILED,
+        error_text="timeout",
+    )
+
+    database.init()
+
+    vacancy = database.get("job-1")
+    assert vacancy.analysis_retry_count == 1
+    assert vacancy.analysis_next_retry_at == vacancy.discovered_at
+    assert database.requeue_due_analysis_failures(NOW, max_attempts=3) == 1
+
+
 def test_expired_pending_approval_cannot_be_approved(tmp_path: Path) -> None:
     database = make_database(tmp_path)
     discover(database)

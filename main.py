@@ -6,7 +6,7 @@ import hashlib
 import logging
 import sys
 from collections.abc import Callable
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from ai_analyzer import AnalysisError, VacancyAnalyzer
@@ -25,6 +25,7 @@ from vacancy_filter import title_rejection_reason
 
 
 logger = logging.getLogger(__name__)
+ANALYSIS_MAX_ATTEMPTS = 3
 
 
 async def process_vacancy(
@@ -37,8 +38,13 @@ async def process_vacancy(
     *,
     now_factory: Callable[[], datetime] | None = None,
 ) -> None:
-    now = (now_factory or (lambda: datetime.now(UTC)))()
-    if database.get(summary.id) is not None:
+    clock = now_factory or (lambda: datetime.now(UTC))
+    now = clock()
+    existing = database.get(summary.id)
+    if existing is not None and (
+        existing.status is not VacancyStatus.DISCOVERED
+        or existing.llm_decision is not None
+    ):
         return
     details = await hh_client.read_vacancy(summary, telegram.request_captcha)
     description_hash = (
@@ -46,17 +52,20 @@ async def process_vacancy(
         if details.description
         else ""
     )
-    if not database.discover(
-        job_id=summary.id,
-        title=summary.title,
-        company=details.company,
-        url=summary.url,
-        description_hash=description_hash,
-        search_query=summary.search_query,
-        discovered_at=now,
-    ):
-        return
-    logger.info("vacancy_discovered job_id=%s", summary.id)
+    if existing is None:
+        if not database.discover(
+            job_id=summary.id,
+            title=summary.title,
+            company=details.company,
+            url=summary.url,
+            description_hash=description_hash,
+            search_query=summary.search_query,
+            discovered_at=now,
+        ):
+            return
+        logger.info("vacancy_discovered job_id=%s", summary.id)
+    else:
+        logger.info("vacancy_resumed job_id=%s", summary.id)
     if details.state is not PageState.VACANCY_LOADED:
         error = details.error or details.state.value
         database.transition(
@@ -86,11 +95,12 @@ async def process_vacancy(
     try:
         suitability = await analyzer.assess(summary.title, details.description)
     except AnalysisError as exc:
-        database.transition(
+        database.mark_analysis_failed(
             summary.id,
-            VacancyStatus.DISCOVERED,
-            VacancyStatus.ANALYSIS_FAILED,
-            error_text=exc.error_type,
+            error_type=exc.error_type,
+            now=clock(),
+            retry_after=timedelta(minutes=settings.check_interval_minutes),
+            max_attempts=ANALYSIS_MAX_ATTEMPTS,
         )
         await telegram.notify_analysis_failed(summary.title, summary.url, exc.error_type)
         logger.warning("vacancy_analysis_failed job_id=%s error_type=%s", summary.id, exc.error_type)
@@ -104,6 +114,7 @@ async def process_vacancy(
             llm_decision=False,
             llm_reason=suitability.reason,
             confidence=suitability.confidence,
+            error_text="",
         )
         logger.info("vacancy_rejected job_id=%s source=llm", summary.id)
         return
@@ -142,6 +153,39 @@ async def process_vacancy(
         await telegram.send_preview(database.get(summary.id), include_actions=True)
 
 
+async def retry_due_analyses(
+    settings: Settings,
+    database: Database,
+    hh_client: HHClient,
+    analyzer: VacancyAnalyzer,
+    telegram: TelegramService,
+    *,
+    now_factory: Callable[[], datetime] | None = None,
+) -> None:
+    clock = now_factory or (lambda: datetime.now(UTC))
+    now = clock()
+    # ponytail: one worker owns this lifecycle; add per-row claims if
+    # multi-worker deployments matter.
+    database.requeue_due_analysis_failures(
+        now, max_attempts=ANALYSIS_MAX_ATTEMPTS
+    )
+    for vacancy in database.unprocessed_discovered():
+        await process_vacancy(
+            VacancySummary(
+                vacancy.id,
+                vacancy.title,
+                vacancy.url,
+                vacancy.search_query,
+            ),
+            settings,
+            database,
+            hh_client,
+            analyzer,
+            telegram,
+            now_factory=clock,
+        )
+
+
 async def agent_loop(
     settings: Settings,
     database: Database,
@@ -152,7 +196,15 @@ async def agent_loop(
 ) -> None:
     while True:
         if not control.paused:
-            database.expire_pending(datetime.now(UTC))
+            now = datetime.now(UTC)
+            database.expire_pending(now)
+            await retry_due_analyses(
+                settings,
+                database,
+                hh_client,
+                analyzer,
+                telegram,
+            )
             for query in settings.profile.hh.search_queries:
                 if control.paused:
                     break

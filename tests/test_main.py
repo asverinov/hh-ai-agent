@@ -2,17 +2,21 @@ import asyncio
 import subprocess
 import sys
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
-from ai_analyzer import SuitabilityResult, VacancyAnalyzer
+import pytest
+
+import main as main_module
+from ai_analyzer import AnalysisError, SuitabilityResult, VacancyAnalyzer
 from config import load_settings
 from database import Database, VacancyStatus
 from hh_client import PageState, VacancyDetails, VacancySummary
 from llm.errors import LLMAuthenticationError
 from llm.managed import ManagedLLMProvider
 from llm.providers.fake import FakeProvider
-from main import process_vacancy
+from main import agent_loop, process_vacancy
+from tg_bot import AgentControl
 from tests.test_config import VALID_ENV, write_profile
 
 
@@ -30,6 +34,15 @@ class FakeHHClient:
         return self.details
 
 
+class SearchReached(Exception):
+    pass
+
+
+class StopAtSearchHHClient(FakeHHClient):
+    async def search_vacancies(self, *_args):
+        raise SearchReached
+
+
 class FakeAnalyzer:
     async def assess(self, title: str, description: str) -> SuitabilityResult:
         return SuitabilityResult(
@@ -38,6 +51,17 @@ class FakeAnalyzer:
 
     async def generate_cover_letter(self, title: str, description: str) -> str:
         return "Safe local-profile letter"
+
+
+class SequenceAnalyzer(FakeAnalyzer):
+    def __init__(self, outcomes: list[SuitabilityResult | Exception]):
+        self.outcomes = iter(outcomes)
+
+    async def assess(self, title: str, description: str) -> SuitabilityResult:
+        outcome = next(self.outcomes)
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
 
 
 class FakeTelegram:
@@ -50,6 +74,9 @@ class FakeTelegram:
 
     async def notify(self, text: str):
         self.notifications.append(text)
+
+    async def notify_analysis_failed(self, title: str, url: str, error_type: str):
+        self.notifications.append(error_type)
 
     async def request_captcha(self, screenshot, title: str, timeout_seconds: int):
         return None
@@ -141,7 +168,7 @@ def test_browser_read_error_is_persisted_as_apply_failed(tmp_path: Path) -> None
     assert "navigation failed" in vacancy.error_text
 
 
-def test_llm_failure_rejects_vacancy_without_requesting_approval(
+def test_llm_failure_is_saved_without_rejection_or_approval(
     tmp_path: Path,
 ) -> None:
     app_settings = settings(tmp_path, "approval")
@@ -171,8 +198,244 @@ def test_llm_failure_rejects_vacancy_without_requesting_approval(
     )
 
     vacancy = database.get("job-1")
-    assert vacancy.status is VacancyStatus.REJECTED_BY_LLM
+    assert vacancy.status is VacancyStatus.ANALYSIS_FAILED
+    assert vacancy.llm_decision is None
+    assert vacancy.error_text == "authentication"
+    assert vacancy.analysis_retry_count == 1
+    assert vacancy.analysis_next_retry_at == (
+        NOW + timedelta(minutes=app_settings.check_interval_minutes)
+    ).isoformat()
     assert vacancy.cover_letter == ""
+    assert telegram.previews == []
+    assert telegram.notifications == ["authentication"]
+
+
+def test_analysis_retry_delay_starts_when_failed_analysis_finishes(
+    tmp_path: Path,
+) -> None:
+    app_settings = settings(tmp_path, "approval")
+    database = Database(app_settings.database_path)
+    database.init()
+    telegram = FakeTelegram()
+    details = VacancyDetails(
+        SUMMARY, PageState.VACANCY_LOADED, "Example", "Build Python services"
+    )
+    times = iter((NOW, NOW + timedelta(minutes=5)))
+
+    asyncio.run(
+        process_vacancy(
+            SUMMARY,
+            app_settings,
+            database,
+            FakeHHClient(details),
+            SequenceAnalyzer([AnalysisError("timeout")]),
+            telegram,
+            now_factory=lambda: next(times),
+        )
+    )
+
+    assert database.get(SUMMARY.id).analysis_next_retry_at == (
+        NOW
+        + timedelta(minutes=5)
+        + timedelta(minutes=app_settings.check_interval_minutes)
+    ).isoformat()
+
+
+def test_failed_retry_delay_starts_when_retry_finishes(tmp_path: Path) -> None:
+    app_settings = settings(tmp_path, "approval")
+    database = Database(app_settings.database_path)
+    database.init()
+    assert database.discover(
+        job_id=SUMMARY.id,
+        title=SUMMARY.title,
+        company="Example",
+        url=SUMMARY.url,
+        description_hash="abc123",
+        search_query=SUMMARY.search_query,
+        discovered_at=NOW,
+    )
+    assert database.mark_analysis_failed(
+        SUMMARY.id,
+        error_type="timeout",
+        now=NOW,
+        retry_after=timedelta(minutes=30),
+        max_attempts=3,
+    )
+    telegram = FakeTelegram()
+    details = VacancyDetails(
+        SUMMARY, PageState.VACANCY_LOADED, "Example", "Build Python services"
+    )
+    times = iter(
+        (
+            NOW + timedelta(minutes=30),
+            NOW + timedelta(minutes=30),
+            NOW + timedelta(minutes=35),
+        )
+    )
+
+    asyncio.run(
+        main_module.retry_due_analyses(
+            app_settings,
+            database,
+            FakeHHClient(details),
+            SequenceAnalyzer([AnalysisError("timeout")]),
+            telegram,
+            now_factory=lambda: next(times),
+        )
+    )
+
+    vacancy = database.get(SUMMARY.id)
+    assert vacancy.analysis_retry_count == 2
+    assert vacancy.analysis_next_retry_at == (
+        NOW
+        + timedelta(minutes=35)
+        + timedelta(minutes=app_settings.check_interval_minutes)
+    ).isoformat()
+
+
+def test_agent_loop_retries_due_analysis_before_new_search(tmp_path: Path) -> None:
+    app_settings = settings(tmp_path, "approval")
+    database = Database(app_settings.database_path)
+    database.init()
+    assert database.discover(
+        job_id=SUMMARY.id,
+        title=SUMMARY.title,
+        company="Example",
+        url=SUMMARY.url,
+        description_hash="abc123",
+        search_query=SUMMARY.search_query,
+        discovered_at=NOW,
+    )
+    assert database.mark_analysis_failed(
+        SUMMARY.id,
+        error_type="timeout",
+        now=NOW,
+        retry_after=timedelta(minutes=30),
+        max_attempts=3,
+    )
+    telegram = FakeTelegram()
+    details = VacancyDetails(
+        SUMMARY, PageState.VACANCY_LOADED, "Example", "Build Python services"
+    )
+
+    with pytest.raises(SearchReached):
+        asyncio.run(
+            agent_loop(
+                app_settings,
+                database,
+                StopAtSearchHHClient(details),
+                SequenceAnalyzer(
+                    [
+                        SuitabilityResult(
+                            suitable=True,
+                            confidence=0.91,
+                            reason="Relevant work",
+                        )
+                    ]
+                ),
+                telegram,
+                AgentControl(),
+            )
+        )
+
+    vacancy = database.get(SUMMARY.id)
+    assert vacancy.status is VacancyStatus.PENDING_APPROVAL
+    assert vacancy.error_text == ""
+    assert telegram.previews == [(SUMMARY.id, True)]
+
+
+def test_agent_loop_resumes_interrupted_discovered_analysis_before_search(
+    tmp_path: Path,
+) -> None:
+    app_settings = settings(tmp_path, "approval")
+    database = Database(app_settings.database_path)
+    database.init()
+    assert database.discover(
+        job_id=SUMMARY.id,
+        title=SUMMARY.title,
+        company="Example",
+        url=SUMMARY.url,
+        description_hash="abc123",
+        search_query=SUMMARY.search_query,
+        discovered_at=NOW,
+    )
+    telegram = FakeTelegram()
+    details = VacancyDetails(
+        SUMMARY, PageState.VACANCY_LOADED, "Example", "Build Python services"
+    )
+
+    with pytest.raises(SearchReached):
+        asyncio.run(
+            agent_loop(
+                app_settings,
+                database,
+                StopAtSearchHHClient(details),
+                SequenceAnalyzer(
+                    [
+                        SuitabilityResult(
+                            suitable=True,
+                            confidence=0.91,
+                            reason="Relevant work",
+                        )
+                    ]
+                ),
+                telegram,
+                AgentControl(),
+            )
+        )
+
+    assert database.get(SUMMARY.id).status is VacancyStatus.PENDING_APPROVAL
+    assert telegram.previews == [(SUMMARY.id, True)]
+
+
+def test_retry_uses_valid_negative_decision_instead_of_technical_error(
+    tmp_path: Path,
+) -> None:
+    app_settings = settings(tmp_path, "approval")
+    database = Database(app_settings.database_path)
+    database.init()
+    telegram = FakeTelegram()
+    details = VacancyDetails(
+        SUMMARY, PageState.VACANCY_LOADED, "Example", "Build Python services"
+    )
+    analyzer = SequenceAnalyzer(
+        [
+            AnalysisError("timeout"),
+            SuitabilityResult(
+                suitable=False,
+                confidence=0.2,
+                reason="Role mismatch",
+            ),
+        ]
+    )
+
+    asyncio.run(
+        process_vacancy(
+            SUMMARY,
+            app_settings,
+            database,
+            FakeHHClient(details),
+            analyzer,
+            telegram,
+            now_factory=lambda: NOW,
+        )
+    )
+    asyncio.run(
+        main_module.retry_due_analyses(
+            app_settings,
+            database,
+            FakeHHClient(details),
+            analyzer,
+            telegram,
+            now_factory=lambda: NOW + timedelta(minutes=30),
+        )
+    )
+
+    vacancy = database.get(SUMMARY.id)
+    assert vacancy.status is VacancyStatus.REJECTED_BY_LLM
+    assert vacancy.llm_decision is False
+    assert vacancy.llm_reason == "Role mismatch"
+    assert vacancy.error_text == ""
     assert telegram.previews == []
 
 
