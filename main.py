@@ -159,6 +159,7 @@ async def retry_due_analyses(
     hh_client: HHClient,
     analyzer: VacancyAnalyzer,
     telegram: TelegramService,
+    control: AgentControl,
     *,
     now_factory: Callable[[], datetime] | None = None,
 ) -> None:
@@ -170,6 +171,8 @@ async def retry_due_analyses(
         now, max_attempts=ANALYSIS_MAX_ATTEMPTS
     )
     for vacancy in database.unprocessed_discovered():
+        if control.paused:
+            break
         await process_vacancy(
             VacancySummary(
                 vacancy.id,
@@ -204,6 +207,7 @@ async def agent_loop(
                 hh_client,
                 analyzer,
                 telegram,
+                control,
             )
             for query in settings.profile.hh.search_queries:
                 if control.paused:

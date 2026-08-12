@@ -12,9 +12,10 @@ from ai_analyzer import AnalysisError, SuitabilityResult, VacancyAnalyzer
 from config import load_settings
 from database import Database, VacancyStatus
 from hh_client import PageState, VacancyDetails, VacancySummary
-from llm.errors import LLMAuthenticationError
+from llm.errors import LLMAuthenticationError, LLMTimeoutError
 from llm.managed import ManagedLLMProvider
 from llm.providers.fake import FakeProvider
+from llm.types import LLMResponse
 from main import agent_loop, process_vacancy
 from tg_bot import AgentControl
 from tests.test_config import VALID_ENV, write_profile
@@ -62,6 +63,17 @@ class SequenceAnalyzer(FakeAnalyzer):
         if isinstance(outcome, Exception):
             raise outcome
         return outcome
+
+
+class PausingAnalyzer(FakeAnalyzer):
+    def __init__(self, control: AgentControl):
+        self.control = control
+        self.calls = 0
+
+    async def assess(self, title: str, description: str) -> SuitabilityResult:
+        self.calls += 1
+        self.control.paused = True
+        return await super().assess(title, description)
 
 
 class FakeTelegram:
@@ -280,6 +292,7 @@ def test_failed_retry_delay_starts_when_retry_finishes(tmp_path: Path) -> None:
             FakeHHClient(details),
             SequenceAnalyzer([AnalysisError("timeout")]),
             telegram,
+            AgentControl(),
             now_factory=lambda: next(times),
         )
     )
@@ -291,6 +304,122 @@ def test_failed_retry_delay_starts_when_retry_finishes(tmp_path: Path) -> None:
         + timedelta(minutes=35)
         + timedelta(minutes=app_settings.check_interval_minutes)
     ).isoformat()
+
+
+def test_pause_stops_retry_backlog_before_next_vacancy(tmp_path: Path) -> None:
+    app_settings = settings(tmp_path, "approval")
+    database = Database(app_settings.database_path)
+    database.init()
+    second = VacancySummary(
+        "job-2", "Backend developer", "https://example.com/vacancy/job-2", "Python"
+    )
+    for offset, summary in enumerate((SUMMARY, second)):
+        discovered_at = NOW + timedelta(seconds=offset)
+        assert database.discover(
+            job_id=summary.id,
+            title=summary.title,
+            company="Example",
+            url=summary.url,
+            description_hash=f"hash-{offset}",
+            search_query=summary.search_query,
+            discovered_at=discovered_at,
+        )
+        assert database.mark_analysis_failed(
+            summary.id,
+            error_type="timeout",
+            now=discovered_at,
+            retry_after=timedelta(minutes=30),
+            max_attempts=3,
+        )
+    control = AgentControl()
+    analyzer = PausingAnalyzer(control)
+    details = VacancyDetails(
+        SUMMARY, PageState.VACANCY_LOADED, "Example", "Build Python services"
+    )
+
+    asyncio.run(
+        main_module.retry_due_analyses(
+            app_settings,
+            database,
+            FakeHHClient(details),
+            analyzer,
+            FakeTelegram(),
+            control,
+            now_factory=lambda: NOW + timedelta(minutes=31),
+        )
+    )
+
+    assert analyzer.calls == 1
+    assert database.get(SUMMARY.id).status is VacancyStatus.PENDING_APPROVAL
+    assert database.get(second.id).status is VacancyStatus.DISCOVERED
+
+
+def test_three_timeouts_are_retried_in_later_cycle(tmp_path: Path) -> None:
+    app_settings = settings(tmp_path, "approval")
+    database = Database(app_settings.database_path)
+    database.init()
+    adapter = FakeProvider(
+        [
+            LLMTimeoutError(),
+            LLMTimeoutError(),
+            LLMTimeoutError(),
+            LLMResponse(
+                text='{"suitable":true,"confidence":0.91,"reason":"Relevant work"}',
+                provider="fake",
+                model="test-model",
+            ),
+            LLMResponse(
+                text="Safe local-profile letter", provider="fake", model="test-model"
+            ),
+        ]
+    )
+
+    async def no_sleep(_seconds: float) -> None:
+        pass
+
+    provider = ManagedLLMProvider(
+        adapter,
+        database,
+        max_retries=2,
+        max_requests_per_day=100,
+        sleep=no_sleep,
+        now_factory=lambda: NOW,
+    )
+    analyzer = VacancyAnalyzer(app_settings, provider)
+    telegram = FakeTelegram()
+    details = VacancyDetails(
+        SUMMARY, PageState.VACANCY_LOADED, "Example", "Build Python services"
+    )
+
+    asyncio.run(
+        process_vacancy(
+            SUMMARY,
+            app_settings,
+            database,
+            FakeHHClient(details),
+            analyzer,
+            telegram,
+            now_factory=lambda: NOW,
+        )
+    )
+    assert database.get(SUMMARY.id).status is VacancyStatus.ANALYSIS_FAILED
+
+    asyncio.run(
+        main_module.retry_due_analyses(
+            app_settings,
+            database,
+            FakeHHClient(details),
+            analyzer,
+            telegram,
+            AgentControl(),
+            now_factory=lambda: NOW + timedelta(minutes=30),
+        )
+    )
+
+    vacancy = database.get(SUMMARY.id)
+    assert vacancy.status is VacancyStatus.PENDING_APPROVAL
+    assert vacancy.llm_decision is True
+    assert len(adapter.requests) == 5
 
 
 def test_agent_loop_retries_due_analysis_before_new_search(tmp_path: Path) -> None:
@@ -427,6 +556,7 @@ def test_retry_uses_valid_negative_decision_instead_of_technical_error(
             FakeHHClient(details),
             analyzer,
             telegram,
+            AgentControl(),
             now_factory=lambda: NOW + timedelta(minutes=30),
         )
     )
