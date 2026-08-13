@@ -112,6 +112,34 @@ def test_unprocessed_discovered_returns_only_interrupted_rows(tmp_path: Path) ->
     assert [row.id for row in database.unprocessed_discovered()] == ["interrupted"]
 
 
+def test_company_and_fit_summary_are_persisted(tmp_path: Path) -> None:
+    database = make_database(tmp_path)
+    assert database.discover(
+        job_id="job-1",
+        title="Python developer",
+        company="Example",
+        company_url="https://hh.ru/employer/123",
+        url="https://hh.ru/vacancy/1",
+        description_hash="abc123",
+        search_query="Python",
+        discovered_at=NOW,
+    )
+    assert database.store_company_details("job-1", rating=4.7, reviews_count=128)
+    assert database.store_analysis(
+        "job-1",
+        cover_letter="Letter",
+        llm_decision=True,
+        llm_reason="Relevant",
+        confidence=0.8,
+        fit_summary="Навыки: Python",
+    )
+
+    vacancy = database.get("job-1")
+    assert vacancy.company_url == "https://hh.ru/employer/123"
+    assert (vacancy.company_rating, vacancy.company_reviews_count) == (4.7, 128)
+    assert vacancy.fit_summary == "Навыки: Python"
+
+
 def test_search_run_survives_reopen_with_aggregated_reasons(tmp_path: Path) -> None:
     path = tmp_path / "agent.db"
     database = Database(path)
@@ -360,3 +388,62 @@ def test_legacy_applied_jobs_is_preserved_and_not_imported(tmp_path: Path) -> No
     assert database.applied_today(NOW) == 0
     with sqlite3.connect(path) as connection:
         assert connection.execute("SELECT title FROM applied_jobs").fetchone()[0] == "Rejected in old version"
+
+
+def test_legacy_vacancy_survives_status_and_ux_column_migration(tmp_path: Path) -> None:
+    path = tmp_path / "agent.db"
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            """
+            CREATE TABLE vacancies (
+                id TEXT PRIMARY KEY,
+                title TEXT NOT NULL,
+                company TEXT NOT NULL DEFAULT '',
+                url TEXT NOT NULL,
+                description_hash TEXT NOT NULL DEFAULT '',
+                search_query TEXT NOT NULL DEFAULT '',
+                llm_decision INTEGER,
+                llm_reason TEXT NOT NULL DEFAULT '',
+                confidence REAL,
+                cover_letter TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL CHECK (status IN ('discovered', 'pending_approval')),
+                discovered_at TEXT NOT NULL,
+                approval_requested_at TEXT,
+                approval_expires_at TEXT,
+                approved_at TEXT,
+                applied_at TEXT,
+                approver_id INTEGER,
+                permit_hash TEXT,
+                error_text TEXT NOT NULL DEFAULT ''
+            )
+            """
+        )
+        connection.execute(
+            """
+            INSERT INTO vacancies (
+                id, title, company, url, description_hash, search_query,
+                llm_reason, cover_letter, status, discovered_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                "job-1",
+                "Legacy Python role",
+                "Example",
+                "https://hh.ru/vacancy/1",
+                "hash",
+                "Python",
+                "Relevant",
+                "Letter",
+                "pending_approval",
+                NOW.isoformat(),
+            ),
+        )
+
+    database = Database(path)
+    database.init()
+
+    vacancy = database.get("job-1")
+    assert vacancy.title == "Legacy Python role"
+    assert vacancy.status is VacancyStatus.PENDING_APPROVAL
+    assert vacancy.company_url == ""
+    assert vacancy.fit_summary == ""

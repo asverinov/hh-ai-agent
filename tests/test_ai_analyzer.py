@@ -65,6 +65,46 @@ def test_valid_structured_suitability_is_accepted(tmp_path: Path) -> None:
     )
 
 
+def test_fit_points_are_optional_display_only_data(tmp_path: Path) -> None:
+    vacancy_analyzer, adapter = analyzer(
+        tmp_path,
+        [
+            response(
+                '{"suitable": true, "confidence": 0.82, '
+                '"reason": "Relevant backend work", '
+                '"fit_points": [{"category": "Навыки", "text": "Python"}]}'
+            )
+        ],
+    )
+
+    result = asyncio.run(vacancy_analyzer.assess("Developer", "Description"))
+
+    assert result.suitable is True
+    assert result.fit_points == [{"category": "Навыки", "text": "Python"}]
+    assert "display-only" in adapter.requests[0].system_instructions
+
+
+@pytest.mark.parametrize("fit_points", ["broken", {"category": "Опыт"}, 42])
+def test_invalid_fit_points_do_not_change_positive_decision(
+    tmp_path: Path, fit_points: object
+) -> None:
+    raw = json.dumps(
+        {
+            "suitable": True,
+            "confidence": 0.82,
+            "reason": "Relevant backend work",
+            "fit_points": fit_points,
+        },
+        ensure_ascii=False,
+    )
+    vacancy_analyzer, _ = analyzer(tmp_path, [response(raw)])
+
+    result = asyncio.run(vacancy_analyzer.assess("Developer", "Description"))
+
+    assert result.suitable is True
+    assert result.fit_points is None
+
+
 @pytest.mark.parametrize(
     "raw",
     [
@@ -80,13 +120,13 @@ def test_valid_structured_suitability_is_accepted(tmp_path: Path) -> None:
         '{"suitable": true, "confidence": 0.8, "reason": "' + "x" * 501 + '"}',
     ],
 )
-def test_invalid_structured_results_fail_closed(tmp_path: Path, raw: str) -> None:
+def test_invalid_structured_results_raise_analysis_error(tmp_path: Path, raw: str) -> None:
     vacancy_analyzer, _ = analyzer(tmp_path, [response(raw)])
 
-    with pytest.raises(AnalysisError) as raised:
+    with pytest.raises(AnalysisError) as exc_info:
         asyncio.run(vacancy_analyzer.assess("Developer", "Description"))
 
-    assert raised.value.error_type == "invalid_response"
+    assert exc_info.value.error_type == "invalid_response"
 
 
 def test_schema_failure_gets_at_most_one_managed_retry(tmp_path: Path) -> None:

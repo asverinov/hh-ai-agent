@@ -10,18 +10,27 @@ from pathlib import Path
 from typing import Any
 
 from aiogram import Bot, Dispatcher, F
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.types import (
     CallbackQuery,
     FSInputFile,
+    InputRichBlockDetails,
+    InputRichBlockDivider,
+    InputRichBlockParagraph,
+    InputRichBlockSectionHeading,
+    InputRichMessage,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     Message,
+    RichTextBold,
+    RichTextUrl,
 )
 
 from approval import ApprovalService
 from config import Settings
 from database import Database, Vacancy
+from fit_summary import FIT_SUMMARY_FALLBACK
 
 
 logger = logging.getLogger(__name__)
@@ -264,26 +273,107 @@ class TelegramService:
                     ],
                 ]
             )
-        confidence = "n/a" if vacancy.confidence is None else f"{vacancy.confidence:.0%}"
-        text = (
-            f"<b>{html.escape(vacancy.title)}</b>\n"
-            f"Company: {html.escape(vacancy.company or 'unknown')}\n"
-            f"<a href=\"{html.escape(vacancy.url, quote=True)}\">Open vacancy</a>\n\n"
-            f"Why it fits: {html.escape(vacancy.llm_reason)}\n"
-            f"Confidence: {confidence}\n\n"
-            f"<b>Cover letter</b>\n{html.escape(vacancy.cover_letter)}"
-        )
-        await self.bot.send_message(
-            chat_id=self.settings.tg_user_id,
-            text=text,
-            parse_mode="HTML",
-            reply_markup=keyboard,
-            disable_web_page_preview=True,
-        )
+        try:
+            await self.bot.send_rich_message(
+                chat_id=self.settings.tg_user_id,
+                rich_message=self._rich_card(vacancy),
+                reply_markup=keyboard,
+            )
+        except TelegramBadRequest:
+            logger.warning("telegram_rich_message_fallback job_id=%s", vacancy.id)
+            await self.bot.send_message(
+                chat_id=self.settings.tg_user_id,
+                text=self._html_card(vacancy),
+                parse_mode="HTML",
+                reply_markup=keyboard,
+                disable_web_page_preview=True,
+            )
         logger.info(
             "%s job_id=%s",
             "approval_requested" if include_actions else "preview_sent",
             vacancy.id,
+        )
+
+    @staticmethod
+    def _confidence(vacancy: Vacancy) -> str:
+        return "нет данных" if vacancy.confidence is None else f"{vacancy.confidence:.0%}"
+
+    @staticmethod
+    def _rating(vacancy: Vacancy) -> str | None:
+        if vacancy.company_rating is None or vacancy.company_reviews_count is None:
+            return None
+        rating = f"{vacancy.company_rating:.1f}".replace(".", ",")
+        return f"★ {rating}/5 · {vacancy.company_reviews_count} отзывов"
+
+    @staticmethod
+    def _fit_lines(vacancy: Vacancy) -> list[tuple[str, str]]:
+        return [
+            (category, value)
+            for line in (vacancy.fit_summary or FIT_SUMMARY_FALLBACK).splitlines()
+            for category, separator, value in [line.partition(": ")]
+            if separator
+        ]
+
+    @classmethod
+    def _rich_card(cls, vacancy: Vacancy) -> InputRichMessage:
+        company_blocks = [
+            InputRichBlockParagraph(
+                text=[RichTextBold(text="Компания: "), vacancy.company or "не указана"]
+            )
+        ]
+        if rating := cls._rating(vacancy):
+            company_blocks.append(
+                InputRichBlockParagraph(
+                    text=[RichTextBold(text="Рейтинг HH: "), rating]
+                )
+            )
+        return InputRichMessage(
+            skip_entity_detection=True,
+            blocks=[
+                InputRichBlockSectionHeading(text=vacancy.title, size=2),
+                InputRichBlockParagraph(
+                    text=RichTextUrl(text="Открыть вакансию", url=vacancy.url)
+                ),
+                InputRichBlockDivider(),
+                InputRichBlockDetails(
+                    summary="Компания", blocks=company_blocks, is_open=True
+                ),
+                InputRichBlockSectionHeading(text="Почему мне подходит", size=3),
+                *[
+                    InputRichBlockParagraph(
+                        text=[RichTextBold(text=f"{category}: "), value]
+                    )
+                    for category, value in cls._fit_lines(vacancy)
+                ],
+                InputRichBlockParagraph(
+                    text=[RichTextBold(text="Уверенность: "), cls._confidence(vacancy)]
+                ),
+                InputRichBlockDetails(
+                    summary="Сопроводительное письмо",
+                    blocks=[InputRichBlockParagraph(text=vacancy.cover_letter)],
+                    is_open=False,
+                ),
+            ],
+        )
+
+    @classmethod
+    def _html_card(cls, vacancy: Vacancy) -> str:
+        rating = cls._rating(vacancy)
+        company = html.escape(vacancy.company or "не указана")
+        company_text = f"<b>Компания</b>\nКомпания: {company}"
+        if rating:
+            company_text += f"\nРейтинг HH: {rating}"
+        fit_text = "\n".join(
+            f"<b>{html.escape(category)}:</b> {html.escape(value)}"
+            for category, value in cls._fit_lines(vacancy)
+        )
+        return (
+            f"<b>{html.escape(vacancy.title)}</b>\n"
+            f"<a href=\"{html.escape(vacancy.url, quote=True)}\">Открыть вакансию</a>\n\n"
+            f"{company_text}\n\n"
+            f"<b>Почему мне подходит</b>\n{fit_text}\n"
+            f"Уверенность: {cls._confidence(vacancy)}\n\n"
+            f"<b>Сопроводительное письмо</b>\n{html.escape(vacancy.cover_letter)}"
         )
 
     async def notify(self, text: str) -> None:

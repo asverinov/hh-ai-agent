@@ -11,7 +11,7 @@ from datetime import UTC, datetime
 from enum import Enum
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlencode, urlparse
+from urllib.parse import urlencode, urljoin, urlparse
 from uuid import uuid4
 
 from approval import ApplicationPermission, ApprovalGuard
@@ -60,6 +60,13 @@ class VacancyDetails:
     company: str = ""
     description: str = ""
     error: str = ""
+    company_url: str = ""
+
+
+@dataclass(frozen=True)
+class CompanyDetails:
+    rating: float | None = None
+    reviews_count: int | None = None
 
 
 CaptchaSolver = Callable[[Path, str, int], Awaitable[str | None]]
@@ -68,6 +75,25 @@ CaptchaSolver = Callable[[Path, str, int], Awaitable[str | None]]
 def _vacancy_id(url: str) -> str | None:
     match = re.search(r"(?:^|/)vacancy/(\d+)(?:/|$)", urlparse(url).path)
     return match.group(1) if match else None
+
+
+async def _visible_text(page: Any, selector: str) -> str:
+    locator = page.locator(selector)
+    return (await locator.inner_text()).strip() if await locator.is_visible() else ""
+
+
+def _company_url(vacancy_url: str, href: str | None) -> str:
+    if not href:
+        return ""
+    parsed = urlparse(urljoin(vacancy_url, href))
+    if (
+        parsed.scheme != "https"
+        or parsed.hostname not in {"hh.ru", "www.hh.ru"}
+        or re.fullmatch(r"/employer/\d+/?", parsed.path) is None
+    ):
+        return ""
+    return f"https://hh.ru{parsed.path.rstrip('/')}"
+
 
 
 async def classify_page(page: Any) -> PageState:
@@ -272,7 +298,13 @@ class HHClient:
                 if await company_locator.is_visible()
                 else ""
             )
-            return VacancyDetails(summary, state, company, description)
+            company_url = _company_url(
+                summary.url,
+                await company_locator.get_attribute("href") if company else None,
+            )
+            return VacancyDetails(
+                summary, state, company, description, company_url=company_url
+            )
         except Exception as exc:
             return VacancyDetails(summary, PageState.NETWORK_ERROR, error=str(exc))
         finally:
@@ -285,6 +317,41 @@ class HHClient:
                         summary.id,
                         exc,
                     )
+
+    async def read_company_details(self, company_url: str) -> CompanyDetails:
+        company_url = _company_url("https://hh.ru/", company_url)
+        if not company_url:
+            return CompanyDetails()
+        page = None
+        try:
+            page = await self.context.new_page()
+            await self._delay()
+            await page.goto(company_url, wait_until="domcontentloaded", timeout=30_000)
+            rating_text = await _visible_text(
+                page, '[data-qa="employer-review-small-widget-total-rating"]'
+            )
+            reviews_text = await _visible_text(
+                page,
+                '[data-qa="employer-review-small-widget-review-count-action"]',
+            )
+            try:
+                rating = float(rating_text.replace(",", "."))
+                if not 0 <= rating <= 5:
+                    rating = None
+            except ValueError:
+                rating = None
+            match = re.search(r"\d[\d\s\u00a0]*", reviews_text)
+            reviews_count = int(re.sub(r"\D", "", match.group())) if match else None
+            return CompanyDetails(rating, reviews_count)
+        except Exception as exc:
+            logger.warning("company_details_read_failed error_type=%s", type(exc).__name__)
+            return CompanyDetails()
+        finally:
+            if page is not None:
+                try:
+                    await page.close()
+                except Exception:
+                    logger.warning("company_details_page_close_failed")
 
     async def _solve_captcha(
         self, page: Any, summary: VacancySummary, solver: CaptchaSolver

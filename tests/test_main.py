@@ -8,7 +8,7 @@ from pathlib import Path
 from ai_analyzer import SuitabilityResult, VacancyAnalyzer
 from config import load_settings
 from database import Database, VacancyStatus
-from hh_client import PageState, VacancyDetails, VacancySearchResult, VacancySummary
+from hh_client import CompanyDetails, PageState, VacancyDetails, VacancySearchResult, VacancySummary
 from llm.errors import LLMAuthenticationError
 from llm.managed import ManagedLLMProvider
 from llm.providers.fake import FakeProvider
@@ -50,6 +50,9 @@ class FakeHHClient:
     async def check_messages(self, notify):
         self.message_checks += 1
 
+    async def read_company_details(self, company_url: str):
+        return CompanyDetails(4.7, 128)
+
 
 class FakeAnalyzer:
     def __init__(self):
@@ -58,7 +61,10 @@ class FakeAnalyzer:
     async def assess(self, title: str, description: str) -> SuitabilityResult:
         self.assess_calls += 1
         return SuitabilityResult(
-            suitable=True, confidence=0.91, reason="Relevant work"
+            suitable=True,
+            confidence=0.91,
+            reason="Relevant work",
+            fit_points=[{"category": "Навыки", "text": "Python"}],
         )
 
     async def generate_cover_letter(self, title: str, description: str) -> str:
@@ -115,6 +121,8 @@ def test_dry_run_records_and_previews_without_pending_actions(tmp_path: Path) ->
     vacancy = database.get("job-1")
     assert vacancy.status is VacancyStatus.DISCOVERED
     assert vacancy.cover_letter == "Safe local-profile letter"
+    assert vacancy.fit_summary.startswith("Навыки: Python")
+    assert vacancy.company_rating == 4.7
     assert telegram.previews == [("job-1", False)]
 
 
@@ -169,6 +177,7 @@ def test_browser_read_error_is_persisted_as_apply_failed(tmp_path: Path) -> None
     assert "navigation failed" in vacancy.error_text
 
 
+<<<<<<< HEAD
 def test_pending_vacancy_is_resent_without_hh_or_llm_calls(tmp_path: Path) -> None:
     app_settings = settings(tmp_path, "approval")
     database = Database(app_settings.database_path)
@@ -390,7 +399,7 @@ def test_search_run_stats_opens_for_repeated_page_structure_changes(
     assert stats.circuit_reason(app_settings) == "page_structure_changed"
 
 
-def test_llm_failure_is_not_rejection_or_pending_approval(
+def test_llm_failure_records_analysis_failure_without_requesting_approval(
     tmp_path: Path,
 ) -> None:
     app_settings = settings(tmp_path, "approval")

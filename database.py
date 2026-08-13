@@ -30,11 +30,15 @@ class Vacancy:
     id: str
     title: str
     company: str
+    company_url: str
+    company_rating: float | None
+    company_reviews_count: int | None
     url: str
     description_hash: str
     search_query: str
     llm_decision: bool | None
     llm_reason: str
+    fit_summary: str
     confidence: float | None
     cover_letter: str
     status: VacancyStatus
@@ -149,11 +153,15 @@ class Database:
                     id TEXT PRIMARY KEY,
                     title TEXT NOT NULL,
                     company TEXT NOT NULL DEFAULT '',
+                    company_url TEXT NOT NULL DEFAULT '',
+                    company_rating REAL,
+                    company_reviews_count INTEGER,
                     url TEXT NOT NULL,
                     description_hash TEXT NOT NULL DEFAULT '',
                     search_query TEXT NOT NULL DEFAULT '',
                     llm_decision INTEGER,
                     llm_reason TEXT NOT NULL DEFAULT '',
+                    fit_summary TEXT NOT NULL DEFAULT '',
                     confidence REAL,
                     cover_letter TEXT NOT NULL DEFAULT '',
                     status TEXT NOT NULL CHECK (status IN ({statuses})),
@@ -227,9 +235,19 @@ class Database:
             columns = {
                 row[1] for row in connection.execute("PRAGMA table_info(vacancies)")
             }
-            for name in ("applying_at", "submit_attempted_at"):
+            migrations = {
+                "applying_at": "TEXT",
+                "submit_attempted_at": "TEXT",
+                "company_url": "TEXT NOT NULL DEFAULT ''",
+                "company_rating": "REAL",
+                "company_reviews_count": "INTEGER",
+                "fit_summary": "TEXT NOT NULL DEFAULT ''",
+            }
+            for name, definition in migrations.items():
                 if name not in columns:
-                    connection.execute(f"ALTER TABLE vacancies ADD COLUMN {name} TEXT")
+                    connection.execute(
+                        f"ALTER TABLE vacancies ADD COLUMN {name} {definition}"
+                    )
             self._migrate_status_check(connection)
 
     def _migrate_status_check(self, connection: sqlite3.Connection) -> None:
@@ -259,11 +277,15 @@ class Database:
                 id TEXT PRIMARY KEY,
                 title TEXT NOT NULL,
                 company TEXT NOT NULL DEFAULT '',
+                company_url TEXT NOT NULL DEFAULT '',
+                company_rating REAL,
+                company_reviews_count INTEGER,
                 url TEXT NOT NULL,
                 description_hash TEXT NOT NULL DEFAULT '',
                 search_query TEXT NOT NULL DEFAULT '',
                 llm_decision INTEGER,
                 llm_reason TEXT NOT NULL DEFAULT '',
+                fit_summary TEXT NOT NULL DEFAULT '',
                 confidence REAL,
                 cover_letter TEXT NOT NULL DEFAULT '',
                 status TEXT NOT NULL CHECK (status IN ({statuses})),
@@ -280,7 +302,17 @@ class Database:
             )
             """
         )
-        connection.execute("INSERT INTO vacancies SELECT * FROM _vacancies_old")
+        columns = (
+            "id, title, company, url, description_hash, search_query, "
+            "llm_decision, llm_reason, confidence, cover_letter, status, "
+            "discovered_at, approval_requested_at, approval_expires_at, "
+            "approved_at, applied_at, approver_id, permit_hash, error_text, "
+            "applying_at, submit_attempted_at, company_url, company_rating, "
+            "company_reviews_count, fit_summary"
+        )
+        connection.execute(
+            f"INSERT INTO vacancies ({columns}) SELECT {columns} FROM _vacancies_old"
+        )
         connection.execute("DROP TABLE _vacancies_old")
         connection.execute(
             "CREATE INDEX IF NOT EXISTS vacancies_status_idx ON vacancies(status)"
@@ -307,11 +339,15 @@ class Database:
             id=row["id"],
             title=row["title"],
             company=row["company"],
+            company_url=row["company_url"],
+            company_rating=row["company_rating"],
+            company_reviews_count=row["company_reviews_count"],
             url=row["url"],
             description_hash=row["description_hash"],
             search_query=row["search_query"],
             llm_decision=None if row["llm_decision"] is None else bool(row["llm_decision"]),
             llm_reason=row["llm_reason"],
+            fit_summary=row["fit_summary"],
             confidence=row["confidence"],
             cover_letter=row["cover_letter"],
             status=VacancyStatus(row["status"]),
@@ -332,6 +368,7 @@ class Database:
         job_id: str,
         title: str,
         company: str,
+        company_url: str = "",
         url: str,
         description_hash: str,
         search_query: str,
@@ -341,20 +378,35 @@ class Database:
             cursor = connection.execute(
                 """
                 INSERT OR IGNORE INTO vacancies (
-                    id, title, company, url, description_hash, search_query,
+                    id, title, company, company_url, url, description_hash, search_query,
                     status, discovered_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     job_id,
                     title,
                     company,
+                    company_url,
                     url,
                     description_hash,
                     search_query,
                     VacancyStatus.DISCOVERED.value,
                     _iso(discovered_at),
                 ),
+            )
+            return cursor.rowcount == 1
+
+    def store_company_details(
+        self, job_id: str, *, rating: float | None, reviews_count: int | None
+    ) -> bool:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE vacancies
+                SET company_rating = ?, company_reviews_count = ?
+                WHERE id = ?
+                """,
+                (rating, reviews_count, job_id),
             )
             return cursor.rowcount == 1
 
@@ -411,6 +463,7 @@ class Database:
         llm_decision: bool,
         llm_reason: str,
         confidence: float,
+        fit_summary: str = "",
         now: datetime,
     ) -> bool:
         with self._connect() as connection:
@@ -418,7 +471,7 @@ class Database:
                 """
                 UPDATE vacancies SET
                     status = ?, cover_letter = ?, llm_decision = ?,
-                    llm_reason = ?, confidence = ?, approval_requested_at = ?,
+                    llm_reason = ?, fit_summary = ?, confidence = ?, approval_requested_at = ?,
                     approval_expires_at = NULL, error_text = ''
                 WHERE id = ? AND status = ?
                 """,
@@ -427,6 +480,7 @@ class Database:
                     cover_letter,
                     int(llm_decision),
                     llm_reason,
+                    fit_summary,
                     confidence,
                     _iso(now),
                     job_id,
@@ -443,18 +497,20 @@ class Database:
         llm_decision: bool,
         llm_reason: str,
         confidence: float,
+        fit_summary: str = "",
     ) -> bool:
         with self._connect() as connection:
             cursor = connection.execute(
                 """
                 UPDATE vacancies SET cover_letter = ?, llm_decision = ?,
-                    llm_reason = ?, confidence = ?
+                    llm_reason = ?, fit_summary = ?, confidence = ?
                 WHERE id = ? AND status = ?
                 """,
                 (
                     cover_letter,
                     int(llm_decision),
                     llm_reason,
+                    fit_summary,
                     confidence,
                     job_id,
                     VacancyStatus.DISCOVERED.value,
