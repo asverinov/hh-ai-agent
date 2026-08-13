@@ -759,7 +759,15 @@ class TelegramService:
             logger.warning("notify_update_available_failed error=%s", exc)
 
     async def start_polling(self) -> None:
-        await self.dispatcher.start_polling(self.bot)
+        while True:
+            try:
+                await self.dispatcher.start_polling(self.bot)
+                break
+            except asyncio.CancelledError:
+                break
+            except Exception as exc:
+                logger.warning("telegram_polling_error error=%s, retrying in 5s", exc)
+                await asyncio.sleep(5)
 
     async def stop(self) -> None:
         session = getattr(self.bot, "session", None)
