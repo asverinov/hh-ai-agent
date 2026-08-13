@@ -31,6 +31,7 @@ from vacancy_filter import title_rejection_reason
 
 
 logger = logging.getLogger(__name__)
+ANALYSIS_MAX_ATTEMPTS = 3
 
 
 @dataclass(frozen=True)
@@ -110,7 +111,8 @@ async def process_vacancy(
     *,
     now_factory: Callable[[], datetime] | None = None,
 ) -> VacancyProcessResult:
-    now = (now_factory or (lambda: datetime.now(UTC)))()
+    clock = now_factory or (lambda: datetime.now(UTC))
+    now = clock()
     existing = database.get(summary.id)
     if summary.previously_sent:
         if existing is None or existing.status is not VacancyStatus.PENDING_APPROVAL:
@@ -177,11 +179,12 @@ async def process_vacancy(
     try:
         suitability = await analyzer.assess(summary.title, details.description)
     except AnalysisError as exc:
-        database.transition(
+        database.mark_analysis_failed(
             summary.id,
-            VacancyStatus.DISCOVERED,
-            VacancyStatus.ANALYSIS_FAILED,
-            error_text=exc.error_type,
+            error_type=exc.error_type,
+            now=clock(),
+            retry_after=timedelta(minutes=settings.check_interval_minutes),
+            max_attempts=ANALYSIS_MAX_ATTEMPTS,
         )
         await telegram.notify_analysis_failed(summary.title, summary.url, exc.error_type)
         logger.warning("vacancy_analysis_failed job_id=%s error_type=%s", summary.id, exc.error_type)
@@ -199,6 +202,7 @@ async def process_vacancy(
             llm_decision=False,
             llm_reason=suitability.reason,
             confidence=suitability.confidence,
+            error_text="",
         )
         logger.info("vacancy_rejected job_id=%s source=llm", summary.id)
         return VacancyProcessResult(
@@ -301,6 +305,9 @@ async def run_search_cycle(
 
     try:
         database.expire_approved(now())
+        database.requeue_due_analysis_failures(
+            now(), max_attempts=ANALYSIS_MAX_ATTEMPTS
+        )
         for vacancy in database.unprocessed_discovered():
             if control.paused:
                 break
@@ -408,6 +415,42 @@ async def run_search_cycle(
         result.error_count,
     )
     return result
+
+
+async def retry_due_analyses(
+    settings: Settings,
+    database: Database,
+    hh_client: HHClient,
+    analyzer: VacancyAnalyzer,
+    telegram: TelegramService,
+    control: AgentControl,
+    *,
+    now_factory: Callable[[], datetime] | None = None,
+) -> None:
+    clock = now_factory or (lambda: datetime.now(UTC))
+    now = clock()
+    # ponytail: one worker owns this lifecycle; add per-row claims if
+    # multi-worker deployments matter.
+    database.requeue_due_analysis_failures(
+        now, max_attempts=ANALYSIS_MAX_ATTEMPTS
+    )
+    for vacancy in database.unprocessed_discovered():
+        if control.paused:
+            break
+        await process_vacancy(
+            VacancySummary(
+                vacancy.id,
+                vacancy.title,
+                vacancy.url,
+                vacancy.search_query,
+            ),
+            settings,
+            database,
+            hh_client,
+            analyzer,
+            telegram,
+            now_factory=clock,
+        )
 
 
 async def agent_loop(

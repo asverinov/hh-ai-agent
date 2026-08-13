@@ -51,6 +51,8 @@ class Vacancy:
     applied_at: str | None
     approver_id: int | None
     error_text: str
+    analysis_retry_count: int
+    analysis_next_retry_at: str | None
 
 
 @dataclass(frozen=True)
@@ -188,7 +190,9 @@ class Database:
                     applied_at TEXT,
                     approver_id INTEGER,
                     permit_hash TEXT,
-                    error_text TEXT NOT NULL DEFAULT ''
+                    error_text TEXT NOT NULL DEFAULT '',
+                    analysis_retry_count INTEGER NOT NULL DEFAULT 0,
+                    analysis_next_retry_at TEXT
                 )
                 """
             )
@@ -286,6 +290,8 @@ class Database:
                 "company_rating": "REAL",
                 "company_reviews_count": "INTEGER",
                 "fit_summary": "TEXT NOT NULL DEFAULT ''",
+                "analysis_retry_count": "INTEGER NOT NULL DEFAULT 0",
+                "analysis_next_retry_at": "TEXT",
             }
             for name, definition in migrations.items():
                 if name not in columns:
@@ -293,6 +299,17 @@ class Database:
                         f"ALTER TABLE vacancies ADD COLUMN {name} {definition}"
                     )
             self._migrate_status_check(connection)
+            connection.execute(
+                """
+                UPDATE vacancies
+                SET analysis_retry_count = 1,
+                    analysis_next_retry_at = discovered_at
+                WHERE status = ?
+                  AND analysis_retry_count = 0
+                  AND analysis_next_retry_at IS NULL
+                """,
+                (VacancyStatus.ANALYSIS_FAILED.value,),
+            )
 
     def _migrate_status_check(self, connection: sqlite3.Connection) -> None:
         """Пересоздать таблицу vacancies если CHECK-ограничение не включает новые статусы.
@@ -342,7 +359,9 @@ class Database:
                 applied_at TEXT,
                 approver_id INTEGER,
                 permit_hash TEXT,
-                error_text TEXT NOT NULL DEFAULT ''
+                error_text TEXT NOT NULL DEFAULT '',
+                analysis_retry_count INTEGER NOT NULL DEFAULT 0,
+                analysis_next_retry_at TEXT
             )
             """
         )
@@ -352,7 +371,7 @@ class Database:
             "discovered_at, approval_requested_at, approval_expires_at, "
             "approved_at, applied_at, approver_id, permit_hash, error_text, "
             "applying_at, submit_attempted_at, company_url, company_rating, "
-            "company_reviews_count, fit_summary"
+            "company_reviews_count, fit_summary, analysis_retry_count, analysis_next_retry_at"
         )
         connection.execute(
             f"INSERT INTO vacancies ({columns}) SELECT {columns} FROM _vacancies_old"
@@ -404,6 +423,8 @@ class Database:
             applied_at=row["applied_at"],
             approver_id=row["approver_id"],
             error_text=row["error_text"],
+            analysis_retry_count=row["analysis_retry_count"],
+            analysis_next_retry_at=row["analysis_next_retry_at"],
         )
 
     def discover(
@@ -472,6 +493,64 @@ class Database:
             ).fetchall()
             return [self._vacancy(row) for row in rows]
 
+    def mark_analysis_failed(
+        self,
+        job_id: str,
+        *,
+        error_type: str,
+        now: datetime,
+        retry_after: timedelta,
+        max_attempts: int,
+    ) -> bool:
+        if max_attempts < 1:
+            raise ValueError("max_attempts must be positive")
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE vacancies SET
+                    status = ?, llm_decision = NULL, error_text = ?,
+                    analysis_retry_count = analysis_retry_count + 1,
+                    analysis_next_retry_at = CASE
+                        WHEN analysis_retry_count + 1 < ? THEN ?
+                        ELSE NULL
+                    END
+                WHERE id = ? AND status = ? AND analysis_retry_count < ?
+                """,
+                (
+                    VacancyStatus.ANALYSIS_FAILED.value,
+                    error_type,
+                    max_attempts,
+                    _iso(now + retry_after),
+                    job_id,
+                    VacancyStatus.DISCOVERED.value,
+                    max_attempts,
+                ),
+            )
+            return cursor.rowcount == 1
+
+    def requeue_due_analysis_failures(
+        self, now: datetime, *, max_attempts: int
+    ) -> int:
+        if max_attempts < 1:
+            raise ValueError("max_attempts must be positive")
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE vacancies
+                SET status = ?, analysis_next_retry_at = NULL
+                WHERE status = ?
+                  AND analysis_retry_count < ?
+                  AND analysis_next_retry_at IS NOT NULL
+                  AND analysis_next_retry_at <= ?
+                """,
+                (
+                    VacancyStatus.DISCOVERED.value,
+                    VacancyStatus.ANALYSIS_FAILED.value,
+                    max_attempts,
+                    _iso(now),
+                ),
+            )
+            return cursor.rowcount
     def transition(
         self,
         job_id: str,
@@ -547,7 +626,8 @@ class Database:
             cursor = connection.execute(
                 """
                 UPDATE vacancies SET cover_letter = ?, llm_decision = ?,
-                    llm_reason = ?, fit_summary = ?, confidence = ?
+                    llm_reason = ?, fit_summary = ?, confidence = ?, error_text = '',
+                    analysis_next_retry_at = NULL
                 WHERE id = ? AND status = ?
                 """,
                 (
