@@ -135,8 +135,24 @@ def load_settings(
     profile_path: Path | str | None = None,
     environ: Mapping[str, str] | None = None,
 ) -> Settings:
-    values = {key: value for key, value in dotenv_values(env_path).items() if value is not None}
-    values.update(os.environ if environ is None else environ)
+    values: dict[str, str] = {}
+    resolved_env_path = Path(env_path)
+    if environ is None:
+        if resolved_env_path.exists():
+            values = {
+                key: value
+                for key, value in dotenv_values(resolved_env_path, encoding="utf-8").items()
+                if value is not None
+            }
+        values.update(os.environ)
+    else:
+        if resolved_env_path != BASE_DIR / ".env" and resolved_env_path.exists():
+            values = {
+                key: value
+                for key, value in dotenv_values(resolved_env_path, encoding="utf-8").items()
+                if value is not None
+            }
+        values.update(environ)
     errors: list[str] = []
 
     def required(key: str) -> str:

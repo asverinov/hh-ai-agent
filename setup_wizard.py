@@ -752,6 +752,11 @@ def build_env(
         f"APPROVAL_TTL_MINUTES={limits.get('APPROVAL_TTL_MINUTES', '30')}",
         f"CAPTCHA_TIMEOUT_SECONDS={limits.get('CAPTCHA_TIMEOUT_SECONDS', '120')}",
         f"CAPTCHA_MAX_ATTEMPTS={limits.get('CAPTCHA_MAX_ATTEMPTS', '2')}",
+        "",
+        "# === Circuit Breaker ===",
+        f"CIRCUIT_BREAKER_MIN_SAMPLE={limits.get('CIRCUIT_BREAKER_MIN_SAMPLE', '5')}",
+        f"CIRCUIT_BREAKER_UNKNOWN_RATIO={limits.get('CIRCUIT_BREAKER_UNKNOWN_RATIO', '0.8')}",
+        f"CIRCUIT_BREAKER_PAGE_ERRORS={limits.get('CIRCUIT_BREAKER_PAGE_ERRORS', '3')}",
     ]
     return "\n".join(lines) + "\n"
 
@@ -950,6 +955,10 @@ def step_advanced(current: dict[str, str]) -> dict[str, str]:
     result["APPROVAL_TTL_MINUTES"] = ask(
         "Время жизни подтверждения (минуты)",
         default=get("APPROVAL_TTL_MINUTES", "30"),
+    )
+    result["CIRCUIT_BREAKER_PAGE_ERRORS"] = ask(
+        "Количество ошибок подряд для срабатывания защиты (circuit breaker)",
+        default=get("CIRCUIT_BREAKER_PAGE_ERRORS", "3"),
     )
     return result
 

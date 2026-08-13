@@ -36,7 +36,7 @@ def write_env(tmp_path: Path, **overrides: str) -> Path:
         **overrides,
     }
     path = tmp_path / ".env"
-    path.write_text("\n".join(f"{key}={value}" for key, value in values.items()))
+    path.write_text("\n".join(f"{key}={value}" for key, value in values.items()), encoding="utf-8")
     return path
 
 

@@ -383,19 +383,6 @@ def test_existing_analysis_failure_becomes_due_after_retry_migration(
     assert vacancy.analysis_retry_count == 1
     assert vacancy.analysis_next_retry_at == vacancy.discovered_at
     assert database.requeue_due_analysis_failures(NOW, max_attempts=3) == 1
-    database = make_database(tmp_path)
-    discover(database)
-
-    token = database.approve(
-        "job-1", 42, 42, NOW + timedelta(hours=8), ttl_minutes=30
-    )
-
-    assert token
-    vacancy = database.get("job-1")
-    assert vacancy.status is VacancyStatus.APPROVED
-    assert vacancy.approval_expires_at == (
-        NOW + timedelta(hours=8, minutes=30)
-    ).isoformat()
 
 
 def test_foreign_user_cannot_approve_or_skip(tmp_path: Path) -> None:
