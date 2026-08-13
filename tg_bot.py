@@ -681,7 +681,10 @@ class TelegramService:
         )
 
     async def notify(self, text: str) -> None:
-        await self.bot.send_message(chat_id=self.settings.tg_user_id, text=text)
+        try:
+            await self.bot.send_message(chat_id=self.settings.tg_user_id, text=text)
+        except Exception as exc:
+            logger.warning("telegram_notify_failed error=%s", exc)
 
     async def notify_analysis_failed(self, title: str, url: str, error_type: str) -> None:
         text = (
@@ -690,12 +693,15 @@ class TelegramService:
             f"<a href=\"{html.escape(url, quote=True)}\">Открыть вакансию</a>\n\n"
             f"Причина: <code>{html.escape(error_type)}</code>"
         )
-        await self.bot.send_message(
-            chat_id=self.settings.tg_user_id,
-            text=text,
-            parse_mode="HTML",
-            disable_web_page_preview=True,
-        )
+        try:
+            await self.bot.send_message(
+                chat_id=self.settings.tg_user_id,
+                text=text,
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+        except Exception as exc:
+            logger.warning("notify_analysis_failed_error error=%s", exc)
 
     async def notify_questionnaire_required(self, title: str, url: str) -> None:
         text = (
@@ -704,12 +710,15 @@ class TelegramService:
             f"<a href=\"{html.escape(url, quote=True)}\">Открыть вакансию на HH.ru</a>\n\n"
             f"Работодатель требует заполнении анкеты или выполнение тестового задания."
         )
-        await self.bot.send_message(
-            chat_id=self.settings.tg_user_id,
-            text=text,
-            parse_mode="HTML",
-            disable_web_page_preview=True,
-        )
+        try:
+            await self.bot.send_message(
+                chat_id=self.settings.tg_user_id,
+                text=text,
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+        except Exception as exc:
+            logger.warning("notify_questionnaire_failed error=%s", exc)
 
     async def request_captcha(
         self, screenshot: Path, title: str, timeout_seconds: int

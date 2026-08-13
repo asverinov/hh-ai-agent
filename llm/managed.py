@@ -85,8 +85,20 @@ class ManagedLLMProvider:
                     raise LLMInvalidResponseError()
                 parsed = None
                 if response_model is not None:
+                    raw_text = response.text.strip()
+                    if raw_text.startswith("```"):
+                        lines = raw_text.splitlines()
+                        if lines[0].startswith("```"):
+                            lines = lines[1:]
+                        if lines and lines[-1].startswith("```"):
+                            lines = lines[:-1]
+                        raw_text = "\n".join(lines).strip()
+                    first_brace = raw_text.find("{")
+                    last_brace = raw_text.rfind("}")
+                    if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
+                        raw_text = raw_text[first_brace : last_brace + 1]
                     try:
-                        parsed = response_model.model_validate_json(response.text)
+                        parsed = response_model.model_validate_json(raw_text)
                     except ValidationError as exc:
                         raise LLMInvalidResponseError() from exc
                 self.database.complete_llm_request(
