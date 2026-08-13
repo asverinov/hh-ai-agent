@@ -33,6 +33,8 @@ from database import Database, Vacancy
 from fit_summary import FIT_SUMMARY_FALLBACK
 from llm.errors import LLMError
 from llm.mistral_keys import MistralKeyCheckResult, MistralKeyManager, MistralKeyView
+from updater import ReleaseInfo, check_github_release
+from version import __version__
 
 
 logger = logging.getLogger(__name__)
@@ -81,6 +83,8 @@ class TelegramService:
         self._edit_job_id: str | None = None
         self._edit_future: asyncio.Future[str | None] | None = None
         self._mistral_key_input: MistralKeyInputSession | None = None
+        self.latest_release: ReleaseInfo | None = None
+        self._notified_release_tag: str | None = None
         self._register_handlers()
 
     def authorized(self, user_id: int) -> bool:
@@ -107,7 +111,11 @@ class TelegramService:
         if name == "status":
             stats = self.database.stats()
             processed = sum(stats.values())
+            version_str = f"v{__version__}"
+            if self.latest_release is not None:
+                version_str += f" (доступно обновление {self.latest_release.tag_name})"
             return (
+                f"версия: {version_str}\n"
                 f"mode: {self.settings.app_mode}\n"
                 f"state: {'paused' if self.control.paused else 'running'}\n"
                 f"processed: {processed}\n"
@@ -138,8 +146,11 @@ class TelegramService:
 
     def _diagnostics(self) -> str:
         run = self.database.latest_search_run()
+        version_str = f"v{__version__}"
+        if self.latest_release is not None:
+            version_str += f" (доступно: {self.latest_release.tag_name})"
         if run is None:
-            return "No search diagnostics recorded."
+            return f"версия: {version_str}\nNo search diagnostics recorded."
         started = datetime.fromisoformat(run.started_at)
         finished = datetime.fromisoformat(run.finished_at)
         reasons = ", ".join(
@@ -164,6 +175,7 @@ class TelegramService:
                 "%Y-%m-%d %H:%M:%S"
             )
         return (
+            f"версия: {version_str}\n"
             f"последний цикл: {started.astimezone():%Y-%m-%d %H:%M:%S}\n"
             f"состояние: {run.state}\n"
             f"длительность: {int((finished - started).total_seconds())} с\n"
@@ -716,6 +728,35 @@ class TelegramService:
             return None
         finally:
             self._captcha_future = None
+
+    async def check_updates(self, notify: bool = True) -> ReleaseInfo | None:
+        try:
+            release = await check_github_release(current_version=__version__)
+        except Exception as exc:
+            logger.debug("update_check_failed error=%s", exc)
+            return None
+        if release is not None:
+            self.latest_release = release
+            if notify and self._notified_release_tag != release.tag_name:
+                self._notified_release_tag = release.tag_name
+                await self.notify_update_available(release)
+        return release
+
+    async def notify_update_available(self, release: ReleaseInfo) -> None:
+        text = (
+            f"🚀 <b>Доступно обновление HH Agent {html.escape(release.tag_name)}!</b>\n"
+            f"Текущая версия: <code>v{__version__}</code>\n\n"
+            f"<a href=\"{html.escape(release.html_url, quote=True)}\">Посмотреть список изменений на GitHub</a>"
+        )
+        try:
+            await self.bot.send_message(
+                chat_id=self.settings.tg_user_id,
+                text=text,
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+        except Exception as exc:
+            logger.warning("notify_update_available_failed error=%s", exc)
 
     async def start_polling(self) -> None:
         await self.dispatcher.start_polling(self.bot)

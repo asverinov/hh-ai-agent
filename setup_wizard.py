@@ -19,6 +19,8 @@ import urllib.request
 import urllib.error
 from pathlib import Path
 
+from version import __version__
+
 # ---------------------------------------------------------------------------
 # ANSI-цвета (stdlib, без rich)
 # ---------------------------------------------------------------------------
@@ -1007,7 +1009,7 @@ def show_next_steps(mode: str, env: dict[str, str]) -> None:
 
 def wizard_new(existing_env: dict[str, str], existing_profile: dict) -> None:
     """Полный wizard для первичной настройки."""
-    header("HH Agent — Мастер настройки")
+    header(f"HH Agent v{__version__} — Мастер настройки")
     print(f"""
   Этот мастер поможет вам настроить агента за несколько минут.
   Агент будет искать вакансии на HH.ru, анализировать их с помощью AI
@@ -1054,7 +1056,7 @@ def wizard_new(existing_env: dict[str, str], existing_profile: dict) -> None:
 
 def wizard_edit(existing_env: dict[str, str], existing_profile: dict) -> None:
     """Режим редактирования существующей конфигурации."""
-    header("HH Agent — Редактирование конфигурации")
+    header(f"HH Agent v{__version__} — Редактирование конфигурации")
     show_current_config(existing_env, existing_profile)
 
     while True:
@@ -1172,7 +1174,7 @@ def main() -> None:
         return
 
     if has_config:
-        header("HH Agent — Конфигурация найдена")
+        header(f"HH Agent v{__version__} — Конфигурация найдена")
         show_current_config(existing_env, existing_profile)
         print()
         choice = ask_choice(

@@ -28,6 +28,7 @@ from llm.types import LLMRequest
 from logging_setup import configure_logging
 from tg_bot import AgentControl, TelegramService
 from vacancy_filter import title_rejection_reason
+from version import __version__
 
 
 logger = logging.getLogger(__name__)
@@ -510,6 +511,8 @@ async def run(settings: Settings) -> None:
         analyzer = VacancyAnalyzer(settings, llm_provider)
         if mistral_keys is not None:
             mistral_keys.set_notifier(telegram.notify)
+        if hasattr(telegram, "check_updates"):
+            asyncio.create_task(telegram.check_updates(notify=True))
         await asyncio.gather(
             telegram.start_polling(),
             agent_loop(settings, database, hh_client, analyzer, telegram, control),
@@ -558,6 +561,11 @@ def cli(
     provider_factory: Callable[[Settings, Database], LLMProvider] = create_llm_provider,
 ) -> int:
     parser = argparse.ArgumentParser(description="Safe personal HH assistant")
+    parser.add_argument(
+        "--version",
+        action="version",
+        version=f"HH Agent v{__version__}",
+    )
     parser.add_argument("--env-file", type=Path, default=Path(".env"))
     parser.add_argument("--profile", type=Path)
     parser.add_argument("--check-config", action="store_true")

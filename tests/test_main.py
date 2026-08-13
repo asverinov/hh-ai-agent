@@ -198,6 +198,9 @@ def test_run_shares_mistral_manager_and_assigns_telegram_notifier(
         async def notify(self, _text: str) -> None:
             return None
 
+        async def check_updates(self, notify: bool = True) -> None:
+            return None
+
         async def start_polling(self) -> None:
             return None
 
