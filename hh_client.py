@@ -423,21 +423,29 @@ class HHClient:
                 raise QuestionnaireRequiredError("questionnaire_required")
 
             letter_toggle = (
-                page.locator('[data-qa*="letter-toggle"]')
-                .or_(page.get_by_text("Написать сопроводительное", exact=True))
-                .or_(page.get_by_text("Добавить сопроводительное", exact=True))
+                page.locator('[data-qa*="letter-toggle"], [data-qa*="response-letter"]')
+                .or_(page.locator('button:has-text("сопроводительное"), a:has-text("сопроводительное"), span:has-text("сопроводительное")'))
                 .first
             )
             if await letter_toggle.is_visible():
                 await letter_toggle.click()
+                await self._delay()
+
             textarea = page.locator('textarea:not([name^="task_"])').first
-            await textarea.wait_for(state="visible", timeout=10_000)
-            await textarea.fill(vacancy.cover_letter)
-            await self._delay()
+            try:
+                await textarea.wait_for(state="visible", timeout=3000)
+                await textarea.fill(vacancy.cover_letter)
+                await self._delay()
+            except Exception:
+                logger.info("cover_letter_field_not_found job_id=%s, proceeding to submit", vacancy.id)
 
             submit_button = page.locator(
                 'button[data-qa*="vacancy-response-submit"]:visible'
             ).first
+            if not await submit_button.is_visible():
+                submit_button = page.locator(
+                    'button[data-qa*="response-submit"]:visible, button:has-text("Откликнуться"):visible'
+                ).first
             if not await submit_button.is_visible():
                 raise RuntimeError("final application button was not found")
             if not self.database.mark_submit_attempt(
