@@ -142,30 +142,44 @@ class HHClient:
             for attempt in range(1, 4):
                 try:
                     await page.goto(
-                        "https://hh.ru/",
+                        "https://hh.ru/applicant/resumes",
                         wait_until="domcontentloaded",
                         timeout=90_000,
                     )
-                    login = page.locator(
-                        'a:has-text("Войти"), button:has-text("Войти")'
-                    ).first
-                    if not await login.is_visible():
+                    login_indicators = page.locator(
+                        'input[type="tel"], input[data-qa*="login"], a:has-text("Войти"), button:has-text("Войти"), [data-qa*="login-submit"]'
+                    )
+                    page_url = getattr(page, "url", "") or ""
+                    is_login_page = (
+                        "account/login" in str(page_url)
+                        or await login_indicators.first.is_visible()
+                    )
+                    if not is_login_page:
                         return True
                     if self.settings.browser_headless:
                         logger.error("hh_login_required headless=true")
                         return False
                     await asyncio.to_thread(
                         input,
-                        "Sign in to HH.ru in the opened browser, then press Enter here: ",
+                        "\n⚠️ Авторизуйтесь на HH.ru в открывшемся браузере и нажмите Enter в терминале: ",
                     )
-                    await page.reload(wait_until="domcontentloaded")
-                    return not await login.is_visible()
+                    await page.goto(
+                        "https://hh.ru/applicant/resumes",
+                        wait_until="domcontentloaded",
+                        timeout=90_000,
+                    )
+                    page_url = getattr(page, "url", "") or ""
+                    is_login_page = (
+                        "account/login" in str(page_url)
+                        or await login_indicators.first.is_visible()
+                    )
+                    return not is_login_page
                 except Exception as exc:
                     logger.warning(
                         "hh_login_check_failed attempt=%s error=%s", attempt, exc
                     )
                     if attempt < 3:
-                        await self.sleep(120)
+                        await self.sleep(10)
             return False
         finally:
             await page.close()
@@ -400,6 +414,11 @@ class HHClient:
             page = await self.context.new_page()
             await self._delay()
             await page.goto(vacancy.url, wait_until="domcontentloaded", timeout=30_000)
+
+            # Check if user is unauthenticated
+            if await page.locator('input[type="tel"], a[data-qa="mainmenu_applicantAccess"]:has-text("Войти")').first.is_visible():
+                raise RuntimeError("Сессия на HH.ru не авторизована. Требуется вход в аккаунт HH.ru.")
+
             response_button = page.locator(
                 'a[data-qa="vacancy-response-link-top"], button[data-qa="vacancy-response-link-top"]'
             ).first
