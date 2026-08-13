@@ -159,9 +159,16 @@ class HHClient:
                     if self.settings.browser_headless:
                         logger.error("hh_login_required headless=true")
                         return False
+
+                    print("\n" + "=" * 60)
+                    print("🔑 ТРЕБУЕТСЯ АВТОРИЗАЦИЯ НА HH.RU")
+                    print("1. В открывшемся окне браузера войдите в свой аккаунт HH.ru.")
+                    print("2. После успешного входа вернитесь сюда и нажмите ENTER.")
+                    print("=" * 60 + "\n")
+
                     await asyncio.to_thread(
                         input,
-                        "\n⚠️ Авторизуйтесь на HH.ru в открывшемся браузере и нажмите Enter в терминале: ",
+                        "👉 Нажмите ENTER в этом терминале после входа на HH.ru: ",
                     )
                     await page.goto(
                         "https://hh.ru/applicant/resumes",
@@ -173,7 +180,10 @@ class HHClient:
                         "account/login" in str(page_url)
                         or await login_indicators.first.is_visible()
                     )
-                    return not is_login_page
+                    if not is_login_page:
+                        print("✅ Успешный вход на HH.ru! Продолжаем работу...\n")
+                        return True
+                    return False
                 except Exception as exc:
                     logger.warning(
                         "hh_login_check_failed attempt=%s error=%s", attempt, exc
