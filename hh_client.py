@@ -408,6 +408,27 @@ class HHClient:
             await response_button.click()
             await self._delay()
 
+            # Check if 1-click apply succeeded immediately without popup
+            success_marker = (
+                page.locator(
+                    '[data-qa="vacancy-response-success"], '
+                    '[data-qa="vacancy-response-link-view-topic"]'
+                )
+                .or_(page.get_by_text("Отклик отправлен", exact=False))
+                .or_(page.get_by_text("Вы откликнулись", exact=False))
+                .first
+            )
+            if await success_marker.is_visible() and await self._response_confirmed(page, vacancy.url):
+                if not self.database.complete_application(
+                    permission.job_id,
+                    permission.permit,
+                    success=True,
+                    now=self.now_factory(),
+                ):
+                    raise RuntimeError("application status could not be completed")
+                logger.info("application_sent job_id=%s (1-click direct apply)", permission.job_id)
+                return True
+
             resume_name = self.settings.profile.hh.resume_name
             resume_selector = page.locator(
                 '[data-qa*="resume-select"], [data-qa*="resume-selector"]'
@@ -446,36 +467,28 @@ class HHClient:
                 submit_button = page.locator(
                     'button[data-qa*="response-submit"]:visible, button:has-text("Откликнуться"):visible'
                 ).first
-            if not await submit_button.is_visible():
-                raise RuntimeError("final application button was not found")
-            if not self.database.mark_submit_attempt(
-                permission.job_id,
-                permission.permit,
-                now=self.now_factory(),
-                daily_limit=self.settings.max_applications_per_day,
-            ):
-                error = "application permission failed final pre-submit validation"
-                self.database.complete_application(
+            if await submit_button.is_visible():
+                if not self.database.mark_submit_attempt(
                     permission.job_id,
                     permission.permit,
-                    success=False,
                     now=self.now_factory(),
-                    error_text=error,
-                )
-                logger.warning(
-                    "application_blocked job_id=%s reason=pre_submit_recheck",
-                    permission.job_id,
-                )
-                return False
-            await submit_button.click()
-            success_marker = (
-                page.locator(
-                    '[data-qa="vacancy-response-success"], '
-                    '[data-qa="vacancy-response-link-view-topic"]'
-                )
-                .or_(page.get_by_text("Отклик отправлен", exact=False))
-                .first
-            )
+                    daily_limit=self.settings.max_applications_per_day,
+                ):
+                    error = "application permission failed final pre-submit validation"
+                    self.database.complete_application(
+                        permission.job_id,
+                        permission.permit,
+                        success=False,
+                        now=self.now_factory(),
+                        error_text=error,
+                    )
+                    logger.warning(
+                        "application_blocked job_id=%s reason=pre_submit_recheck",
+                        permission.job_id,
+                    )
+                    return False
+                await submit_button.click()
+
             await success_marker.wait_for(state="visible", timeout=5_000)
             if not await self._response_confirmed(page, vacancy.url):
                 raise RuntimeError("HH.ru did not confirm the application")
