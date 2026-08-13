@@ -82,6 +82,7 @@ python setup_wizard.py --edit
 | `/resume` | Возобновить поиск |
 | `/pending` | Вакансии, ожидающие решения |
 | `/stats` | Статистика по статусам |
+| `/diagnostics` | Результат последнего цикла и состояние circuit breaker |
 | `/cancel` | Отменить ввод CAPTCHA |
 
 ---
@@ -105,7 +106,7 @@ python setup_wizard.py --edit
 
 ## Безопасность
 
-- Реальный отклик требует **трёх одновременных условий**: `APP_MODE=approval` + `ENABLE_REAL_APPLY=true` + нажатие кнопки твоим Telegram ID в течение 30 минут
+- Реальный отклик требует **трёх одновременных условий**: `APP_MODE=approval` + `ENABLE_REAL_APPLY=true` + нажатие кнопки твоим Telegram ID; одноразовое разрешение действует 30 минут после нажатия
 - Массового автоматического режима нет
 - `.env`, `profile.yaml` и `.browser-profile/` исключены из Git
 - Токены, cookies и полный `.env` не записываются в логи

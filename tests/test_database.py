@@ -33,7 +33,6 @@ def discover(database: Database, job_id: str = "job-1", letter: str = "Letter") 
             llm_reason="Profile matches",
             confidence=0.8,
             now=NOW,
-            ttl_minutes=30,
         )
 
 
@@ -94,19 +93,105 @@ def test_duplicate_discovery_is_rejected(tmp_path: Path) -> None:
     assert database.get("job-1").title == "Python developer"
 
 
-def test_expired_pending_approval_cannot_be_approved(tmp_path: Path) -> None:
+def test_unprocessed_discovered_returns_only_interrupted_rows(tmp_path: Path) -> None:
+    database = make_database(tmp_path)
+    discover(database, "interrupted", letter="")
+    discover(database, "previewed", letter="")
+    assert database.store_analysis(
+        "previewed",
+        cover_letter="Letter",
+        llm_decision=True,
+        llm_reason="Profile matches",
+        confidence=0.8,
+    )
+    discover(database, "rejected", letter="")
+    assert database.transition(
+        "rejected", VacancyStatus.DISCOVERED, VacancyStatus.REJECTED_BY_FILTER
+    )
+
+    assert [row.id for row in database.unprocessed_discovered()] == ["interrupted"]
+
+
+def test_search_run_survives_reopen_with_aggregated_reasons(tmp_path: Path) -> None:
+    path = tmp_path / "agent.db"
+    database = Database(path)
+    database.init()
+
+    database.save_search_run(
+        started_at=NOW,
+        finished_at=NOW + timedelta(seconds=12),
+        state="completed",
+        query_count=2,
+        found_results=9,
+        new_vacancies=4,
+        duplicates=5,
+        rejected_by_filter=2,
+        rejected_by_llm=2,
+        telegram_cards=0,
+        error_count=1,
+        rejection_reasons={"title": 2},
+        error_reasons={"network_error": 1},
+        last_safe_error="network_error",
+    )
+
+    run = Database(path).latest_search_run()
+
+    assert run is not None
+    assert run.state == "completed"
+    assert run.found_results == 9
+    assert run.rejection_reasons == {"title": 2}
+    assert run.error_reasons == {"network_error": 1}
+
+
+def test_search_run_can_record_notification_error(tmp_path: Path) -> None:
+    database = make_database(tmp_path)
+    run_id = database.save_search_run(
+        started_at=NOW,
+        finished_at=NOW,
+        state="completed",
+        query_count=1,
+        found_results=0,
+        new_vacancies=0,
+        duplicates=0,
+        rejected_by_filter=0,
+        rejected_by_llm=0,
+        telegram_cards=0,
+        error_count=0,
+        rejection_reasons={},
+        error_reasons={},
+    )
+
+    assert database.record_search_run_error(run_id, "telegram_error")
+    run = database.latest_search_run()
+    assert run is not None
+    assert run.error_count == 1
+    assert run.error_reasons == {"telegram_error": 1}
+    assert run.last_safe_error == "telegram_error"
+
+
+def test_pending_card_does_not_expire_before_user_click(tmp_path: Path) -> None:
+    database = make_database(tmp_path)
+    discover(database)
+
+    assert database.get("job-1").approval_expires_at is None
+    assert database.expire_approved(NOW + timedelta(days=1)) == 0
+    assert database.get("job-1").status is VacancyStatus.PENDING_APPROVAL
+
+
+def test_approval_click_starts_permission_ttl(tmp_path: Path) -> None:
     database = make_database(tmp_path)
     discover(database)
 
     token = database.approve(
-        job_id="job-1",
-        telegram_user_id=42,
-        expected_user_id=42,
-        now=NOW + timedelta(minutes=31),
+        "job-1", 42, 42, NOW + timedelta(hours=8), ttl_minutes=30
     )
 
-    assert token is None
-    assert database.get("job-1").status is VacancyStatus.EXPIRED
+    assert token
+    vacancy = database.get("job-1")
+    assert vacancy.status is VacancyStatus.APPROVED
+    assert vacancy.approval_expires_at == (
+        NOW + timedelta(hours=8, minutes=30)
+    ).isoformat()
 
 
 def test_foreign_user_cannot_approve_or_skip(tmp_path: Path) -> None:
@@ -163,7 +248,6 @@ def test_empty_letter_and_expired_permission_are_blocked(tmp_path: Path) -> None
         llm_reason="Profile matches",
         confidence=0.8,
         now=NOW,
-        ttl_minutes=30,
     )
     empty_token = empty_database.approve("job-1", 42, 42, NOW + timedelta(minutes=1))
     assert empty_token

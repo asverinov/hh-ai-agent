@@ -70,6 +70,9 @@ def test_load_settings_uses_safe_defaults(tmp_path: Path) -> None:
     assert settings.tg_user_id == 123456
     assert settings.profile.candidate.name == "Test Candidate"
     assert settings.profile.hh.search_queries == ("Python developer",)
+    assert settings.circuit_breaker_min_sample == 5
+    assert settings.circuit_breaker_unknown_ratio == 0.8
+    assert settings.circuit_breaker_page_errors == 3
 
 
 @pytest.mark.parametrize(
@@ -101,6 +104,41 @@ def test_load_settings_rejects_invalid_environment(
 
     with pytest.raises(ConfigError, match=message):
         load_settings(profile_path=write_profile(tmp_path), environ=environ)
+
+
+@pytest.mark.parametrize(
+    ("key", "value", "message"),
+    [
+        (
+            "CIRCUIT_BREAKER_MIN_SAMPLE",
+            "0",
+            "CIRCUIT_BREAKER_MIN_SAMPLE must be a positive integer",
+        ),
+        (
+            "CIRCUIT_BREAKER_UNKNOWN_RATIO",
+            "0",
+            "CIRCUIT_BREAKER_UNKNOWN_RATIO must be greater than 0 and at most 1",
+        ),
+        (
+            "CIRCUIT_BREAKER_UNKNOWN_RATIO",
+            "1.1",
+            "CIRCUIT_BREAKER_UNKNOWN_RATIO must be greater than 0 and at most 1",
+        ),
+        (
+            "CIRCUIT_BREAKER_PAGE_ERRORS",
+            "no",
+            "CIRCUIT_BREAKER_PAGE_ERRORS must be an integer",
+        ),
+    ],
+)
+def test_load_settings_rejects_invalid_circuit_breaker_values(
+    tmp_path: Path, key: str, value: str, message: str
+) -> None:
+    with pytest.raises(ConfigError, match=message):
+        load_settings(
+            profile_path=write_profile(tmp_path),
+            environ={**VALID_ENV, key: value},
+        )
 
 
 def test_load_settings_reports_missing_secret_without_traceback_text(

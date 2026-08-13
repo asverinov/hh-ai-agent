@@ -1,6 +1,6 @@
 import asyncio
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from config import load_settings
@@ -66,7 +66,26 @@ def add_preview_vacancy(database: Database) -> None:
         llm_reason="Relevant & local",
         confidence=0.87,
         now=NOW,
-        ttl_minutes=30,
+    )
+
+
+def add_search_run(database: Database) -> None:
+    database.save_search_run(
+        started_at=NOW,
+        finished_at=NOW + timedelta(seconds=12),
+        state="completed",
+        query_count=2,
+        found_results=9,
+        new_vacancies=4,
+        duplicates=5,
+        rejected_by_filter=2,
+        rejected_by_llm=2,
+        telegram_cards=0,
+        error_count=1,
+        rejection_reasons={"title": 2},
+        error_reasons={"network_error": 1},
+        last_safe_error="network_error",
+        circuit_reason="page_structure_changed",
     )
 
 
@@ -92,6 +111,51 @@ def test_pause_resume_and_status_use_live_state(tmp_path: Path) -> None:
     assert telegram.command("resume", user_id=42) == "Agent resumed."
     assert not control.paused
     assert control.wake_event.is_set()
+
+
+def test_diagnostics_shows_last_search_run(tmp_path: Path) -> None:
+    telegram, database, control, _ = service(tmp_path)
+    add_search_run(database)
+    control.circuit_reason = "technical_failure_ratio"
+    control.next_run_at = NOW + timedelta(minutes=30)
+
+    reply = telegram.command("diagnostics", user_id=42)
+
+    assert "длительность: 12 с" in reply
+    assert "запросы: 2" in reply
+    assert "найдено: 9" in reply
+    assert "новые: 4" in reply
+    assert "дубли: 5" in reply
+    assert "фильтр: 2" in reply
+    assert "LLM: 2" in reply
+    assert "title=2" in reply
+    assert "карточки: 0" in reply
+    assert "ошибки: 1" in reply
+    assert "network_error" in reply
+    assert "breaker: open (technical_failure_ratio)" in reply
+    assert "следующий запуск:" in reply
+
+
+def test_resume_clears_runtime_breaker_but_keeps_saved_diagnostics(
+    tmp_path: Path,
+) -> None:
+    telegram, database, control, _ = service(tmp_path)
+    add_search_run(database)
+    control.paused = True
+    control.circuit_reason = "page_structure_changed"
+    control.consecutive_search_errors = 3
+    control.next_run_at = NOW + timedelta(minutes=30)
+
+    assert telegram.command("resume", 42) == "Agent resumed."
+    assert not control.paused
+    assert control.circuit_reason == ""
+    assert control.consecutive_search_errors == 0
+    assert control.next_run_at is None
+    assert control.wake_event.is_set()
+    assert database.latest_search_run().circuit_reason == "page_structure_changed"
+    diagnostics = telegram.command("diagnostics", 42)
+    assert "breaker: closed" in diagnostics
+    assert "last breaker: page_structure_changed" in diagnostics
 
 
 def test_dry_run_preview_has_no_action_buttons_and_escapes_html(tmp_path: Path) -> None:

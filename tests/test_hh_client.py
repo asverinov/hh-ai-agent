@@ -1,5 +1,6 @@
 import asyncio
 from dataclasses import replace
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -47,6 +48,35 @@ class FakeContext:
 
     async def new_page(self) -> FakePage:
         return self.page
+
+
+class SearchCard:
+    def __init__(self, href: str, title: str):
+        self.href = href
+        self.title = title
+
+    async def get_attribute(self, name: str) -> str | None:
+        return self.href if name == "href" else None
+
+    async def inner_text(self) -> str:
+        return self.title
+
+
+class SearchLocator:
+    def __init__(self, cards: list[SearchCard]):
+        self.cards = cards
+
+    async def all(self) -> list[SearchCard]:
+        return self.cards
+
+
+class SearchPage(FakePage):
+    def __init__(self, cards: list[SearchCard] | None = None):
+        super().__init__()
+        self.cards = cards or []
+
+    def locator(self, selector: str) -> SearchLocator:
+        return SearchLocator(self.cards)
 
 
 class FailingContext:
@@ -161,6 +191,165 @@ def test_page_creation_failure_reports_network_error(tmp_path: Path) -> None:
 
     assert result.state is PageState.NETWORK_ERROR
     assert "page creation failed" in result.error
+
+
+def test_search_page_creation_failure_returns_safe_error(tmp_path: Path) -> None:
+    settings = replace(
+        load_settings(profile_path=write_profile(tmp_path), environ=VALID_ENV),
+        database_path=tmp_path / "agent.db",
+    )
+    database = Database(settings.database_path)
+    database.init()
+    client = HHClient(
+        FailingContext(), settings, database, ApprovalGuard(settings, database)
+    )
+
+    result = asyncio.run(client.search_vacancies("Python", (), ()))
+
+    assert result.summaries == []
+    assert result.error_reason == "search_error:RuntimeError"
+
+
+def test_search_ignores_ad_redirects_without_numeric_vacancy_id(
+    tmp_path: Path,
+) -> None:
+    settings = replace(
+        load_settings(profile_path=write_profile(tmp_path), environ=VALID_ENV),
+        database_path=tmp_path / "agent.db",
+        min_seconds_between_actions=0,
+        max_pages_per_query=1,
+    )
+    database = Database(settings.database_path)
+    database.init()
+    page = SearchPage(
+        [
+            SearchCard(
+                "https://adsrv.hh.ru/click?clickType=link_to_vacancy",
+                "Ad",
+            ),
+            SearchCard("https://hh.ru/vacancy/135006927?from=search", "DevOps"),
+        ]
+    )
+
+    async def no_sleep(_seconds: float) -> None:
+        return None
+
+    client = HHClient(
+        FakeContext(page),
+        settings,
+        database,
+        ApprovalGuard(settings, database),
+        sleep=no_sleep,
+    )
+
+    result = asyncio.run(client.search_vacancies("DevOps", (), ()))
+
+    assert [(item.id, item.title) for item in result.summaries] == [
+        ("135006927", "DevOps")
+    ]
+
+
+def test_search_counts_found_new_and_existing_results(tmp_path: Path) -> None:
+    settings = replace(
+        load_settings(profile_path=write_profile(tmp_path), environ=VALID_ENV),
+        database_path=tmp_path / "agent.db",
+        min_seconds_between_actions=0,
+        max_pages_per_query=1,
+    )
+    database = Database(settings.database_path)
+    database.init()
+    assert database.discover(
+        job_id="135006927",
+        title="Existing",
+        company="Example",
+        url="https://hh.ru/vacancy/135006927",
+        description_hash="hash",
+        search_query="DevOps",
+        discovered_at=datetime(2026, 7, 29, tzinfo=UTC),
+    )
+    page = SearchPage(
+        [
+            SearchCard("https://hh.ru/vacancy/135006927", "Existing"),
+            SearchCard("https://hh.ru/vacancy/135006928", "New"),
+            SearchCard("https://example.com/ad", "Ad"),
+        ]
+    )
+
+    async def no_sleep(_seconds: float) -> None:
+        return None
+
+    client = HHClient(
+        FakeContext(page),
+        settings,
+        database,
+        ApprovalGuard(settings, database),
+        sleep=no_sleep,
+    )
+
+    result = asyncio.run(client.search_vacancies("DevOps", (), ()))
+
+    assert result.found_results == 2
+    assert result.duplicates == 1
+    assert [item.id for item in result.summaries] == ["135006928"]
+
+
+def test_search_returns_only_pending_existing_vacancies_as_repeats(
+    tmp_path: Path,
+) -> None:
+    settings = replace(
+        load_settings(profile_path=write_profile(tmp_path), environ=VALID_ENV),
+        database_path=tmp_path / "agent.db",
+        min_seconds_between_actions=0,
+        max_pages_per_query=1,
+    )
+    database = Database(settings.database_path)
+    database.init()
+    now = datetime(2026, 7, 30, tzinfo=UTC)
+    for job_id in ("135006927", "135006928"):
+        assert database.discover(
+            job_id=job_id,
+            title="Existing",
+            company="Example",
+            url=f"https://hh.ru/vacancy/{job_id}",
+            description_hash="hash",
+            search_query="DevOps",
+            discovered_at=now,
+        )
+        assert database.request_approval(
+            job_id=job_id,
+            cover_letter="Letter",
+            llm_decision=True,
+            llm_reason="Relevant",
+            confidence=0.9,
+            now=now,
+        )
+    assert database.skip("135006928", 42, 42)
+    page = SearchPage(
+        [
+            SearchCard("https://hh.ru/vacancy/135006927", "Pending"),
+            SearchCard("https://hh.ru/vacancy/135006928", "Skipped"),
+            SearchCard("https://hh.ru/vacancy/135006929", "New"),
+        ]
+    )
+
+    async def no_sleep(_seconds: float) -> None:
+        return None
+
+    client = HHClient(
+        FakeContext(page),
+        settings,
+        database,
+        ApprovalGuard(settings, database),
+        sleep=no_sleep,
+    )
+
+    result = asyncio.run(client.search_vacancies("DevOps", (), ()))
+
+    assert [(item.id, item.previously_sent) for item in result.summaries] == [
+        ("135006927", True),
+        ("135006929", False),
+    ]
+    assert result.duplicates == 2
 
 
 def test_login_check_retries_temporary_navigation_errors(tmp_path: Path) -> None:

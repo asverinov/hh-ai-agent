@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from ai_analyzer import SuitabilityResult, VacancyAnalyzer
+from ai_analyzer import AnalysisError, SuitabilityResult, VacancyAnalyzer
 from config import load_settings
 from database import Database
 from llm.managed import ManagedLLMProvider
@@ -83,11 +83,10 @@ def test_valid_structured_suitability_is_accepted(tmp_path: Path) -> None:
 def test_invalid_structured_results_fail_closed(tmp_path: Path, raw: str) -> None:
     vacancy_analyzer, _ = analyzer(tmp_path, [response(raw)])
 
-    result = asyncio.run(vacancy_analyzer.assess("Developer", "Description"))
+    with pytest.raises(AnalysisError) as raised:
+        asyncio.run(vacancy_analyzer.assess("Developer", "Description"))
 
-    assert result == SuitabilityResult(
-        suitable=False, confidence=0.0, reason="Invalid model response"
-    )
+    assert raised.value.error_type == "invalid_response"
 
 
 def test_schema_failure_gets_at_most_one_managed_retry(tmp_path: Path) -> None:

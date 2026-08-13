@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+import re
 import tempfile
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
@@ -15,7 +16,7 @@ from uuid import uuid4
 
 from approval import ApplicationPermission, ApprovalGuard
 from config import Settings
-from database import Database
+from database import Database, VacancyStatus
 
 
 logger = logging.getLogger(__name__)
@@ -41,6 +42,15 @@ class VacancySummary:
     title: str
     url: str
     search_query: str
+    previously_sent: bool = False
+
+
+@dataclass(frozen=True)
+class VacancySearchResult:
+    summaries: list[VacancySummary]
+    found_results: int
+    duplicates: int
+    error_reason: str = ""
 
 
 @dataclass(frozen=True)
@@ -53,6 +63,11 @@ class VacancyDetails:
 
 
 CaptchaSolver = Callable[[Path, str, int], Awaitable[str | None]]
+
+
+def _vacancy_id(url: str) -> str | None:
+    match = re.search(r"(?:^|/)vacancy/(\d+)(?:/|$)", urlparse(url).path)
+    return match.group(1) if match else None
 
 
 async def classify_page(page: Any) -> PageState:
@@ -149,10 +164,14 @@ class HHClient:
         query: str,
         areas: tuple[str, ...],
         experience_filters: tuple[str, ...],
-    ) -> list[VacancySummary]:
+    ) -> VacancySearchResult:
         results: list[VacancySummary] = []
-        page = await self.context.new_page()
+        found_results = 0
+        duplicates = 0
+        seen_ids: set[str] = set()
+        page = None
         try:
+            page = await self.context.new_page()
             for page_number in range(self.settings.max_pages_per_query):
                 params: dict[str, Any] = {
                     "text": query,
@@ -177,18 +196,49 @@ class HHClient:
                     title = (await card.inner_text()).strip()
                     if not href:
                         continue
-                    job_id = urlparse(href).path.rstrip("/").split("/")[-1]
-                    if job_id and self.database.get(job_id) is None:
+                    job_id = _vacancy_id(href)
+                    if not job_id:
+                        continue
+                    found_results += 1
+                    if job_id in seen_ids:
+                        duplicates += 1
+                        continue
+                    seen_ids.add(job_id)
+                    existing = self.database.get(job_id)
+                    if existing is not None:
+                        duplicates += 1
+                        if (
+                            existing.status is VacancyStatus.PENDING_APPROVAL
+                            and len(results) < self.settings.max_vacancies_per_query
+                        ):
+                            results.append(
+                                VacancySummary(job_id, title, href, query, True)
+                            )
+                        continue
+                    if len(results) < self.settings.max_vacancies_per_query:
                         results.append(VacancySummary(job_id, title, href, query))
-                    if len(results) >= self.settings.max_vacancies_per_query:
-                        return results
+                if len(results) >= self.settings.max_vacancies_per_query:
+                    break
                 await self._delay()
-            return results
+            return VacancySearchResult(results, found_results, duplicates)
         except Exception as exc:
             logger.error("vacancy_search_failed query=%r error=%s", query, exc)
-            return results
+            return VacancySearchResult(
+                results,
+                found_results,
+                duplicates,
+                f"search_error:{type(exc).__name__}",
+            )
         finally:
-            await page.close()
+            if page is not None:
+                try:
+                    await page.close()
+                except Exception as exc:
+                    logger.warning(
+                        "vacancy_search_page_close_failed query=%r error=%s",
+                        query,
+                        type(exc).__name__,
+                    )
 
     async def read_vacancy(
         self,

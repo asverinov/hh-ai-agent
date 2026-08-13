@@ -94,6 +94,9 @@ class Settings:
     approval_ttl_minutes: int
     captcha_timeout_seconds: int
     captcha_max_attempts: int
+    circuit_breaker_min_sample: int
+    circuit_breaker_unknown_ratio: float
+    circuit_breaker_page_errors: int
     profile: Profile
 
     @property
@@ -180,6 +183,18 @@ def load_settings(
         if not math.isfinite(parsed) or not 0 <= parsed <= 2:
             errors.append(f"{key} must be between 0 and 2")
             return 0.0
+        return parsed
+
+    def ratio(key: str, default: str) -> float:
+        value = values.get(key, default).strip()
+        try:
+            parsed = float(value)
+        except ValueError:
+            errors.append(f"{key} must be a number")
+            return 1.0
+        if not math.isfinite(parsed) or not 0 < parsed <= 1:
+            errors.append(f"{key} must be greater than 0 and at most 1")
+            return 1.0
         return parsed
 
     def is_loopback(hostname: str | None) -> bool:
@@ -355,6 +370,15 @@ def load_settings(
         approval_ttl_minutes=positive_integer("APPROVAL_TTL_MINUTES", "30"),
         captcha_timeout_seconds=positive_integer("CAPTCHA_TIMEOUT_SECONDS", "120"),
         captcha_max_attempts=positive_integer("CAPTCHA_MAX_ATTEMPTS", "2"),
+        circuit_breaker_min_sample=positive_integer(
+            "CIRCUIT_BREAKER_MIN_SAMPLE", "5"
+        ),
+        circuit_breaker_unknown_ratio=ratio(
+            "CIRCUIT_BREAKER_UNKNOWN_RATIO", "0.8"
+        ),
+        circuit_breaker_page_errors=positive_integer(
+            "CIRCUIT_BREAKER_PAGE_ERRORS", "3"
+        ),
         profile=Profile(candidate, hh, cover_letter),
     )
     if errors:
