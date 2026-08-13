@@ -1,18 +1,19 @@
 from config import Settings
 from database import Database
+from llm.base import LLMProvider
 from llm.errors import LLMConfigurationError
 from llm.managed import ManagedLLMProvider
-from llm.providers.mistral import MistralProvider
+from llm.mistral_keys import MistralKeyManager
 from llm.providers.ollama import OllamaProvider
 from llm.providers.openai_compatible import OpenAICompatibleProvider
 
 
-def create_llm_provider(settings: Settings, database: Database) -> ManagedLLMProvider:
+def create_llm_provider(settings: Settings, database: Database) -> LLMProvider:
     config = settings.llm
     if config.provider == "ollama":
         adapter = OllamaProvider(config.ollama_url)
     elif config.provider == "mistral":
-        adapter = MistralProvider(config.mistral_api_key, config.mistral_base_url)
+        return MistralKeyManager(config, database)
     elif config.provider == "openai_compatible":
         adapter = OpenAICompatibleProvider(
             config.openai_compatible_base_url,

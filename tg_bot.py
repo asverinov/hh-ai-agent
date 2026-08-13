@@ -5,12 +5,11 @@ import html
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from aiogram import Bot, Dispatcher, F
-from aiogram.exceptions import TelegramBadRequest
+from aiogram.exceptions import TelegramAPIError, TelegramBadRequest
 from aiogram.filters import Command
 from aiogram.types import (
     CallbackQuery,
@@ -31,10 +30,13 @@ from approval import ApprovalService
 from config import Settings
 from database import Database, Vacancy
 from fit_summary import FIT_SUMMARY_FALLBACK
+from llm.errors import LLMError
+from llm.mistral_keys import MistralKeyCheckResult, MistralKeyManager, MistralKeyView
 
 
 logger = logging.getLogger(__name__)
 PRIVATE_REPLY = "This bot is private."
+MISTRAL_KEY_INPUT_TTL = timedelta(minutes=15)
 
 
 @dataclass
@@ -46,6 +48,13 @@ class AgentControl:
     wake_event: asyncio.Event = field(default_factory=asyncio.Event, repr=False)
 
 
+
+
+@dataclass
+class MistralKeyInputSession:
+    expires_at: datetime
+
+
 class TelegramService:
     def __init__(
         self,
@@ -54,6 +63,7 @@ class TelegramService:
         approval_service: ApprovalService,
         control: AgentControl,
         *,
+        mistral_keys: MistralKeyManager | None = None,
         bot: Any | None = None,
         dispatcher: Dispatcher | None = None,
         now_factory: Callable[[], datetime] | None = None,
@@ -62,12 +72,14 @@ class TelegramService:
         self.database = database
         self.approval_service = approval_service
         self.control = control
+        self.mistral_keys = mistral_keys
         self.bot = bot or Bot(token=settings.tg_bot_token)
         self.dispatcher = dispatcher or Dispatcher()
         self.now_factory = now_factory or (lambda: datetime.now().astimezone())
         self._captcha_future: asyncio.Future[str | None] | None = None
         self._edit_job_id: str | None = None
         self._edit_future: asyncio.Future[str | None] | None = None
+        self._mistral_key_input: MistralKeyInputSession | None = None
         self._register_handlers()
 
     def authorized(self, user_id: int) -> bool:
@@ -177,24 +189,52 @@ class TelegramService:
             "pending",
             "stats",
             "diagnostics",
+            "mistral_keys",
+            "keys",
             "cancel",
         ):
             self.dispatcher.message.register(self._command_handler, Command(name))
         self.dispatcher.callback_query.register(
             self._callback_handler,
-            F.data.startswith("apply:") | F.data.startswith("skip:") | F.data.startswith("edit:"),
+            F.data.startswith("apply:")
+            | F.data.startswith("skip:")
+            | F.data.startswith("edit:")
+            | F.data.startswith("mk:"),
         )
         self.dispatcher.message.register(self._text_handler)
 
     async def _command_handler(self, message: Message) -> None:
         name = (message.text or "").split()[0].lstrip("/").split("@")[0]
+        if not self.authorized(message.from_user.id):
+            await message.answer(PRIVATE_REPLY)
+            return
+        if name in {"mistral_keys", "keys"}:
+            await self._send_mistral_key_menu(message)
+            return
+        if name == "cancel" and self._mistral_key_input is not None:
+            self._mistral_key_input = None
+            await message.answer("Current Mistral key input cancelled.")
+            return
         await message.answer(self.command(name, message.from_user.id))
 
     async def _callback_handler(self, callback: CallbackQuery) -> None:
         if not self.authorized(callback.from_user.id):
-            await callback.answer(PRIVATE_REPLY, show_alert=True)
+            await self._answer_callback(callback, PRIVATE_REPLY, show_alert=True)
             return
-        action, job_id = (callback.data or "").split(":", 1)
+        action, separator, job_id = (callback.data or "").partition(":")
+        if len((callback.data or "").encode()) > 64:
+            await self._answer_callback(
+                callback, "Некорректное действие.", show_alert=True
+            )
+            return
+        if action == "mk":
+            await self._mistral_key_callback(callback, (callback.data or "").split(":"))
+            return
+        if not separator or action not in {"apply", "skip", "edit"} or not job_id:
+            await self._answer_callback(
+                callback, "Некорректное действие.", show_alert=True
+            )
+            return
         if action == "apply":
             # Отвечаем на callback немедленно — Telegram требует ответ в течение ~10 сек,
             # а браузерный отклик может занять значительно больше времени.
@@ -215,6 +255,7 @@ class TelegramService:
                 else:
                     await self.notify(f"✗ {result.message}")
         elif action == "edit":
+            self._mistral_key_input = None
             await callback.answer("Пришлите новый текст сопроводительного письма сообщением (или /cancel):", show_alert=True)
             loop = asyncio.get_running_loop()
             self._edit_job_id = job_id
@@ -237,21 +278,271 @@ class TelegramService:
         else:
             # skip выполняется быстро — можно отвечать обычным способом.
             result = self.approval_service.skip(job_id, callback.from_user.id)
-            await callback.answer(result.message, show_alert=not result.ok)
+            await self._answer_callback(
+                callback, result.message, show_alert=not result.ok
+            )
             if result.ok and callback.message:
                 await callback.message.edit_reply_markup(reply_markup=None)
+
+    async def _send_mistral_key_menu(self, message: Any) -> None:
+        if self.mistral_keys is None:
+            await message.answer("Управление ключами Mistral недоступно.")
+            return
+        try:
+            keys = self.mistral_keys.list_keys()
+        except LLMError as exc:
+            await message.answer(f"Ключи Mistral недоступны: {exc.category}.")
+            return
+        text, keyboard = self._mistral_key_menu(keys)
+        await message.answer(text, reply_markup=keyboard)
+
+    @classmethod
+    def _mistral_key_menu(
+        cls, keys: tuple[MistralKeyView, ...]
+    ) -> tuple[str, InlineKeyboardMarkup | None]:
+        lines = ["Ключи Mistral:"]
+        rows: list[list[InlineKeyboardButton]] = []
+        for key in keys:
+            marker = (
+                "✅ текущий"
+                if key.is_current
+                else {
+                    "ready": "✅ рабочий",
+                    "cooldown": f"⏸ до {key.cooldown_until.astimezone():%H:%M}",
+                    "disabled": "❌ отключён",
+                }[key.status]
+            )
+            lines.append(f"{key.id}. {marker} ····{key.suffix}")
+            rows.append(
+                [
+                    InlineKeyboardButton(
+                        text=f"Проверить {key.id}",
+                        callback_data=f"mk:check:{key.id}",
+                    ),
+                    InlineKeyboardButton(
+                        text=f"Удалить {key.id}",
+                        callback_data=f"mk:delete:{key.id}",
+                    ),
+                ]
+            )
+        if not keys:
+            lines.append("Ключей нет.")
+        rows.append(
+            [
+                InlineKeyboardButton(text="➕ Добавить", callback_data="mk:add"),
+                InlineKeyboardButton(text="Проверить все", callback_data="mk:check"),
+            ]
+        )
+        rows.append(
+            [InlineKeyboardButton(text="Обновить", callback_data="mk:list")]
+        )
+        return "\n".join(lines), cls._mistral_keyboard(rows)
+
+    async def _mistral_key_callback(
+        self, callback: CallbackQuery, parts: list[str]
+    ) -> None:
+        if self.mistral_keys is None:
+            await self._answer_callback(
+                callback, "Управление ключами Mistral недоступно.", show_alert=True
+            )
+            return
+        if parts == ["mk", "add"]:
+            if self._captcha_future and not self._captcha_future.done():
+                await self._answer_callback(
+                    callback, "Сначала завершите CAPTCHA.", show_alert=True
+                )
+                return
+            if self._edit_future is not None:
+                await self._answer_callback(
+                    callback,
+                    "Сначала завершите редактирование письма.",
+                    show_alert=True,
+                )
+                return
+            self._mistral_key_input = MistralKeyInputSession(
+                self.now_factory() + MISTRAL_KEY_INPUT_TTL
+            )
+            await self._answer_callback(
+                callback, "Отправьте ключ одним сообщением."
+            )
+            return
+        if parts == ["mk", "list"]:
+            try:
+                text, keyboard = self._mistral_key_menu(self.mistral_keys.list_keys())
+            except LLMError as exc:
+                await self._answer_callback(
+                    callback, f"Ключи Mistral недоступны: {exc.category}.", show_alert=True
+                )
+                return
+            await self._edit_mistral_message(callback, text, reply_markup=keyboard)
+            return
+        if parts == ["mk", "check"]:
+            await self._answer_callback(callback, "Проверяем ключи.")
+            try:
+                results = await self.mistral_keys.check_all()
+            except LLMError as exc:
+                await self._edit_mistral_message(
+                    callback,
+                    f"Проверка не выполнена: {exc.category}.",
+                    acknowledge=False,
+                )
+                return
+            text = "\n".join(self._mistral_check_text(result) for result in results)
+            await self._edit_mistral_message(
+                callback, text or "Ключей для проверки нет.", acknowledge=False
+            )
+            return
+        if len(parts) != 3 or not parts[2].isdecimal():
+            await self._answer_callback(
+                callback, "Некорректное действие.", show_alert=True
+            )
+            return
+        action, key_id = parts[1], int(parts[2])
+        if action == "delete":
+            keyboard = self._mistral_keyboard(
+                [
+                    [
+                        InlineKeyboardButton(
+                            text="Удалить", callback_data=f"mk:confirm:{key_id}"
+                        ),
+                        InlineKeyboardButton(text="Отмена", callback_data="mk:list"),
+                    ]
+                ]
+            )
+            await self._edit_mistral_message(
+                callback, f"Удалить ключ {key_id}?", reply_markup=keyboard
+            )
+            return
+        if action == "check":
+            await self._answer_callback(callback, "Проверяем ключ.")
+            try:
+                result = await self.mistral_keys.check_key(key_id)
+            except LLMError as exc:
+                await self._edit_mistral_message(
+                    callback,
+                    f"Проверка не выполнена: {exc.category}.",
+                    acknowledge=False,
+                )
+                return
+            if result is None:
+                await self._edit_mistral_message(
+                    callback, "Ключ не найден.", acknowledge=False
+                )
+                return
+            await self._edit_mistral_message(
+                callback, self._mistral_check_text(result), acknowledge=False
+            )
+            return
+        if action == "confirm":
+            try:
+                deleted = await self.mistral_keys.delete_key(key_id)
+            except LLMError as exc:
+                await self._answer_callback(
+                    callback, f"Ключ не удалён: {exc.category}.", show_alert=True
+                )
+                return
+            if not deleted:
+                await self._answer_callback(
+                    callback, "Ключ не найден.", show_alert=True
+                )
+                return
+            await self._edit_mistral_message(callback, f"Ключ {key_id} удалён.")
+            return
+        await self._answer_callback(
+            callback, "Некорректное действие.", show_alert=True
+        )
+
+    @staticmethod
+    def _mistral_check_text(result: MistralKeyCheckResult) -> str:
+        outcome = "работает" if result.success else result.error_type
+        return f"Ключ {result.key.id} ····{result.key.suffix}: {outcome}."
+
+    @staticmethod
+    def _mistral_keyboard(
+        rows: list[list[InlineKeyboardButton]],
+    ) -> InlineKeyboardMarkup | None:
+        if any(
+            len(button.callback_data.encode()) > 64
+            for row in rows
+            for button in row
+        ):
+            return None
+        return InlineKeyboardMarkup(inline_keyboard=rows)
+
+    async def _edit_mistral_message(
+        self,
+        callback: CallbackQuery,
+        text: str,
+        *,
+        reply_markup: InlineKeyboardMarkup | None = None,
+        acknowledge: bool = True,
+    ) -> None:
+        if callback.message is None:
+            await self._answer_callback(
+                callback, "Меню недоступно.", show_alert=True
+            )
+            return
+        try:
+            await callback.message.edit_text(text=text, reply_markup=reply_markup)
+        except TelegramAPIError:
+            if acknowledge:
+                await self._answer_callback(
+                    callback,
+                    "Действие выполнено, но меню не обновлено.",
+                    show_alert=True,
+                )
+            return
+        if acknowledge:
+            await self._answer_callback(callback, "Готово.")
+
+    @staticmethod
+    async def _answer_callback(
+        callback: CallbackQuery, text: str, *, show_alert: bool = False
+    ) -> None:
+        try:
+            await callback.answer(text, show_alert=show_alert)
+        except TelegramAPIError:
+            logger.warning("telegram_callback_answer_failed")
 
     async def _text_handler(self, message: Message) -> None:
         if not self.authorized(message.from_user.id):
             await message.answer(PRIVATE_REPLY)
             return
-        if self._captcha_future and not self._captcha_future.done() and message.text:
-            self._captcha_future.set_result(message.text.strip())
+        text = message.text
+        if text is None or (
+            text.startswith("/") and self._mistral_key_input is None
+        ):
+            return
+        if self._captcha_future and not self._captcha_future.done():
+            self._captcha_future.set_result(text.strip())
             await message.answer("CAPTCHA input received.")
             return
         if self._edit_future and not self._edit_future.done() and message.text:
             self._edit_future.set_result(message.text.strip())
             return
+        key_session = self._mistral_key_input
+        if key_session is None:
+            return
+        if self.now_factory() >= key_session.expires_at:
+            self._mistral_key_input = None
+            await message.answer("Время ввода ключа истекло.")
+            return
+        raw_key = text.strip()
+        try:
+            await message.delete()
+        except TelegramAPIError:
+            self._mistral_key_input = None
+            await message.answer(
+                "Не удалось удалить сообщение. Удалите его вручную и повторите добавление."
+            )
+            return
+        self._mistral_key_input = None
+        try:
+            result = await self.mistral_keys.add_key(raw_key)
+        except LLMError as exc:
+            await message.answer(f"Ключ не добавлен: {exc.category}.")
+            return
+        await message.answer(f"Ключ {result.id} ····{result.suffix} добавлен.")
 
     async def send_preview(self, vacancy: Vacancy, include_actions: bool) -> None:
         keyboard = None
@@ -410,6 +701,7 @@ class TelegramService:
     async def request_captcha(
         self, screenshot: Path, title: str, timeout_seconds: int
     ) -> str | None:
+        self._mistral_key_input = None
         loop = asyncio.get_running_loop()
         self._captcha_future = loop.create_future()
         await self.bot.send_photo(

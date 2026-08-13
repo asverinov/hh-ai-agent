@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import binascii
 import ipaddress
 import math
 import os
@@ -68,6 +70,7 @@ class LLMSettings:
     max_requests_per_day: int
     ollama_url: str
     mistral_api_key: str
+    mistral_keys_master_key: str
     mistral_base_url: str
     openai_compatible_base_url: str
     openai_compatible_api_key: str
@@ -217,6 +220,12 @@ def load_settings(
         elif parsed.scheme == "http" and not is_loopback(parsed.hostname):
             errors.append(f"{key} must use HTTPS for non-loopback hosts")
 
+    def valid_fernet_key(value: str) -> bool:
+        try:
+            return len(base64.urlsafe_b64decode(value.encode())) == 32
+        except (ValueError, binascii.Error):
+            return False
+
     app_mode = values.get("APP_MODE", "dry_run").strip().lower()
     if app_mode not in {"dry_run", "approval"}:
         errors.append("APP_MODE must be dry_run or approval")
@@ -237,14 +246,17 @@ def load_settings(
         "OLLAMA_URL", "http://localhost:11434/api/generate"
     ).strip()
     mistral_api_key = values.get("MISTRAL_API_KEY", "").strip()
+    mistral_keys_master_key = values.get("MISTRAL_KEYS_MASTER_KEY", "").strip()
     mistral_base_url = values.get("MISTRAL_BASE_URL", "").strip()
     compatible_base_url = values.get("OPENAI_COMPATIBLE_BASE_URL", "").strip()
     compatible_api_key = values.get("OPENAI_COMPATIBLE_API_KEY", "").strip()
     if llm_provider == "ollama":
         validate_endpoint("OLLAMA_URL", ollama_url)
     elif llm_provider == "mistral":
-        if not mistral_api_key:
-            errors.append("MISTRAL_API_KEY is required")
+        if not mistral_keys_master_key:
+            errors.append("MISTRAL_KEYS_MASTER_KEY is required")
+        elif not valid_fernet_key(mistral_keys_master_key):
+            errors.append("MISTRAL_KEYS_MASTER_KEY must be a valid Fernet key")
         if mistral_base_url:
             validate_endpoint("MISTRAL_BASE_URL", mistral_base_url, https_only=True)
     elif llm_provider == "openai_compatible":
@@ -348,6 +360,7 @@ def load_settings(
             max_requests_per_day=positive_integer("LLM_MAX_REQUESTS_PER_DAY", "100"),
             ollama_url=ollama_url,
             mistral_api_key=mistral_api_key,
+            mistral_keys_master_key=mistral_keys_master_key,
             mistral_base_url=mistral_base_url,
             openai_compatible_base_url=compatible_base_url,
             openai_compatible_api_key=compatible_api_key,
