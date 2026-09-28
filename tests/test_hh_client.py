@@ -313,14 +313,23 @@ class CaptchaPage:
     ("selector", "expected"),
     [
         ('[data-qa="vacancy-description"]', PageState.VACANCY_LOADED),
+        ('.vacancy-description', PageState.VACANCY_LOADED),
         ('form[action*="captcha"]', PageState.CAPTCHA_DETECTED),
         ('[data-qa="access-denied"]', PageState.ACCESS_DENIED),
         ('[data-qa="vacancy-removed"]', PageState.VACANCY_REMOVED),
+        ('[data-qa="vacancy-archived"]', PageState.VACANCY_REMOVED),
+        (':has-text("Вакансия в архиве")', PageState.VACANCY_REMOVED),
         ("", PageState.PAGE_STRUCTURE_CHANGED),
     ],
 )
 def test_page_state_uses_explicit_signals(selector: str, expected: PageState) -> None:
     assert asyncio.run(classify_page(FakePage(selector))) is expected
+
+
+def test_page_state_detects_login_redirect() -> None:
+    page = FakePage()
+    page.url = "https://hh.ru/account/login?backurl=%2Fvacancy%2F123"
+    assert asyncio.run(classify_page(page)) is PageState.ACCESS_DENIED
 
 
 def test_page_state_reports_network_error() -> None:

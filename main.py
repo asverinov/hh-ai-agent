@@ -1,5 +1,4 @@
 from __future__ import annotations
-
 import argparse
 import asyncio
 import hashlib
@@ -26,13 +25,20 @@ from instance_lock import AlreadyRunningError, single_instance
 from llm.base import LLMProvider
 from llm.errors import LLMError
 from llm.factory import create_llm_provider
-from llm.mistral_keys import MistralKeyManager
+from llm.mistral_keys import MistralKeyCipher, MistralKeyManager
 from llm.types import LLMRequest
 from logging_setup import configure_logging
 from tg_bot import AgentControl, TelegramService
 from vacancy_filter import vacancy_rejection_reason
 from version import __version__
-
+from mascots import (
+    enable_pesec_mode,
+    pesec_on_analyzing,
+    pesec_on_applied,
+    pesec_on_approve,
+    pesec_on_reject,
+    show_pesec_startup,
+)
 
 logger = logging.getLogger(__name__)
 ANALYSIS_MAX_ATTEMPTS = 3
@@ -196,6 +202,7 @@ async def process_vacancy(
     approval_service: ApprovalService | None = None,
     now_factory: Callable[[], datetime] | None = None,
 ) -> VacancyProcessResult:
+    pesec_on_analyzing(summary.title)
     clock = now_factory or (lambda: datetime.now(UTC))
     now = clock()
     existing = database.get(summary.id)
@@ -285,6 +292,7 @@ async def process_vacancy(
         )
 
     if not suitability.suitable:
+        pesec_on_reject(summary.title, reason=f"LLM: {suitability.reason}")
         database.transition(
             summary.id,
             VacancyStatus.DISCOVERED,
@@ -298,6 +306,8 @@ async def process_vacancy(
         return VacancyProcessResult(
             "rejected_by_llm", suitability.reason, PageState.VACANCY_LOADED
         )
+
+    pesec_on_approve(summary.title, score=suitability.confidence)
 
     fit_summary = normalize_fit_summary(suitability.fit_points)
     company = await hh_client.read_company_details(details.company_url)
@@ -353,6 +363,7 @@ async def process_vacancy(
         auto_result = await approval_service.auto_apply(summary.id)
         vacancy = database.get(summary.id)
         if auto_result.ok:
+            pesec_on_applied(summary.title)
             try:
                 await telegram.notify(
                     f"✓ Автоотклик отправлен: {vacancy.title if vacancy else summary.title}"
@@ -719,9 +730,26 @@ async def agent_loop(
             next_auto_batch = None
 
 
+def _ensure_mistral_key_loaded(settings: Settings, database: Database) -> None:
+    if settings.llm.provider == "mistral" and settings.llm.mistral_api_key:
+        if not database.mistral_encrypted_keys():
+            try:
+                cipher = MistralKeyCipher(settings.llm.mistral_keys_master_key)
+                protected = cipher.protect(settings.llm.mistral_api_key)
+                database.add_mistral_key(
+                    encrypted_key=protected.encrypted_key,
+                    key_hmac=protected.key_hmac,
+                    suffix=protected.suffix,
+                    now=datetime.now(UTC),
+                )
+            except Exception as exc:
+                logger.warning("mistral_key_bootstrap_failed error=%s", exc)
+
+
 async def run(settings: Settings) -> None:
     database = Database(settings.database_path)
     database.init()
+    _ensure_mistral_key_loaded(settings, database)
     backend = create_browser_backend(settings)
     llm_provider = create_llm_provider(settings, database)
     mistral_keys = (
@@ -775,6 +803,7 @@ async def check_llm(
 ) -> None:
     database = Database(settings.database_path)
     database.init()
+    _ensure_mistral_key_loaded(settings, database)
     provider = provider_factory(settings, database)
     try:
         response = await provider.generate_text(
@@ -807,16 +836,32 @@ def cli(
         action="version",
         version=f"HH Agent v{__version__}",
     )
+    # Скрытый флаг пасхалки
+    parser.add_argument(
+        "--pesec",
+        "--fox",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
     parser.add_argument("--env-file", type=Path, default=Path(".env"))
     parser.add_argument("--profile", type=Path)
     parser.add_argument("--check-config", action="store_true")
     parser.add_argument("--check-llm", action="store_true")
+
     args = parser.parse_args(argv)
+
+    if args.pesec:
+        enable_pesec_mode()
+        show_pesec_startup()
+    
     try:
         settings = load_settings(args.env_file, args.profile)
     except ConfigError as exc:
         print(exc, file=sys.stderr)
         return 2
+        
+    
+
     if args.check_config:
         print(
             f"Configuration valid: mode={settings.app_mode}, "

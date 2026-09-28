@@ -1,3 +1,4 @@
+from datetime import UTC, datetime
 from pathlib import Path
 
 from cryptography.fernet import Fernet
@@ -205,3 +206,61 @@ def test_check_llm_uses_imported_legacy_mistral_key(
     assert len(adapters) == 1
     assert adapters[0].requests[0].operation == "healthcheck"
     assert adapters[0].closed is True
+
+
+def test_check_llm_bootstraps_mistral_key_when_pool_was_empty(
+    tmp_path: Path, monkeypatch, capsys
+) -> None:
+    raw_key = "bootstrapped-mistral-key"
+    master_key = Fernet.generate_key().decode()
+    db_path = tmp_path / "agent.db"
+    from database import Database
+    db = Database(db_path)
+    db.init()
+    # Close legacy migration with None to simulate the bug scenario
+    db.import_legacy_mistral_key(
+        encrypted_key=None, key_hmac=None, suffix=None, now=datetime.now(UTC)
+    )
+    assert db.mistral_keys(datetime.now(UTC)) == []
+
+    adapters: list[FakeProvider] = []
+
+    def fake_adapter(api_key: str, _base_url: str) -> FakeProvider:
+        assert api_key == raw_key
+        adapter = FakeProvider(
+            [
+                LLMResponse(
+                    text="OK",
+                    provider="mistral",
+                    model="mistral-small-latest",
+                )
+            ]
+        )
+        adapters.append(adapter)
+        return adapter
+
+    monkeypatch.setattr(mistral_keys_module, "MistralProvider", fake_adapter)
+
+    result = main.cli(
+        [
+            "--env-file",
+            str(
+                write_env(
+                    tmp_path,
+                    LLM_PROVIDER="mistral",
+                    LLM_MODEL="mistral-small-latest",
+                    MISTRAL_API_KEY=raw_key,
+                    MISTRAL_KEYS_MASTER_KEY=master_key,
+                )
+            ),
+            "--profile",
+            str(write_profile(tmp_path)),
+            "--check-llm",
+        ]
+    )
+
+    output = capsys.readouterr()
+    assert result == 0
+    assert "success=true" in output.out
+    assert output.err == ""
+    assert len(db.mistral_keys(datetime.now(UTC))) == 1

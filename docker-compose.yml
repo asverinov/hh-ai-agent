@@ -1,0 +1,20 @@
+version: "3.8"
+
+services:
+  hh-agent:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: ghcr.io/${GITHUB_REPOSITORY:-local/hh-ai-agent}:latest
+    container_name: hh-ai-agent
+    restart: unless-stopped
+    shm_size: "1gb"
+    env_file:
+      - .env
+    volumes:
+      - ./agent.db:/app/agent.db
+      - ./agent.log:/app/agent.log
+      - ./profile.yaml:/app/profile.yaml:ro
+      - ./.browser-profile:/app/.browser-profile
+      - ./mascots/assets:/app/mascots/assets:ro
+    command: ["--pesec"]

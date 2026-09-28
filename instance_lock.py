@@ -15,14 +15,13 @@ class AlreadyRunningError(RuntimeError):
     pass
 
 
+_NT_LOCK_OFFSET = 0x7FFFFFFF - 1
+
+
 def _acquire(handle: TextIO) -> None:
     try:
         if os.name == "nt":
-            handle.seek(0)
-            if not handle.read(1):
-                handle.write("0")
-                handle.flush()
-            handle.seek(0)
+            handle.seek(_NT_LOCK_OFFSET)
             msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
         else:
             fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
@@ -32,7 +31,7 @@ def _acquire(handle: TextIO) -> None:
 
 def _release(handle: TextIO) -> None:
     if os.name == "nt":
-        handle.seek(0)
+        handle.seek(_NT_LOCK_OFFSET)
         msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
     else:
         fcntl.flock(handle.fileno(), fcntl.LOCK_UN)

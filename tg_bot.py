@@ -36,7 +36,7 @@ from llm.errors import LLMError
 from llm.mistral_keys import MistralKeyCheckResult, MistralKeyManager, MistralKeyView
 from updater import ReleaseInfo, check_github_release
 from version import __version__
-
+from mascots import get_pesec_image, is_pesec_enabled
 
 logger = logging.getLogger(__name__)
 PRIVATE_REPLY = "This bot is private."
@@ -269,6 +269,17 @@ class TelegramService:
             )
             vacancy = self.database.get(job_id)
             if result.ok:
+                if is_pesec_enabled():
+                    pesec_img = get_pesec_image("applied")
+                    if pesec_img and pesec_img.exists():
+                        try:
+                            await self.bot.send_photo(
+                                chat_id=self.settings.tg_user_id,
+                                photo=FSInputFile(pesec_img),
+                                caption="🐾 Отклик успешно улетел работодателю!",
+                            )
+                        except Exception as exc:
+                            logger.debug("pesec_applied_failed error=%s", exc)
                 await self.notify("✓ Отклик отправлен")
                 if callback.message:
                     await callback.message.edit_reply_markup(reply_markup=None)
@@ -575,6 +586,17 @@ class TelegramService:
         await message.answer(f"Ключ {result.id} ····{result.suffix} добавлен.")
 
     async def send_preview(self, vacancy: Vacancy, include_actions: bool) -> None:
+        if is_pesec_enabled():
+            pesec_img = get_pesec_image("approve")
+            if pesec_img and pesec_img.exists():
+                try:
+                    await self.bot.send_photo(
+                        chat_id=self.settings.tg_user_id,
+                        photo=FSInputFile(pesec_img),
+                        caption="🐾 Песец нашёл годную вакансию!",
+                    )
+                except Exception as exc:
+                    logger.debug("pesec_preview_failed error=%s", exc)
         keyboard = None
         if include_actions:
             keyboard = InlineKeyboardMarkup(

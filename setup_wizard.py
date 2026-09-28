@@ -833,7 +833,30 @@ def build_profile(required: dict, optional: dict) -> str:
     return "\n".join(lines) + "\n"
 
 
-def write_files(env_content: str, profile_content: str) -> None:
+def _sync_mistral_key_to_db(api_key: str, master_key: str) -> None:
+    if not api_key or not master_key:
+        return
+    try:
+        from datetime import UTC, datetime
+        from database import Database
+        from llm.mistral_keys import MistralKeyCipher
+        db_path = BASE_DIR / "agent.db"
+        database = Database(db_path)
+        database.init()
+        if not database.mistral_encrypted_keys():
+            cipher = MistralKeyCipher(master_key)
+            protected = cipher.protect(api_key)
+            database.add_mistral_key(
+                encrypted_key=protected.encrypted_key,
+                key_hmac=protected.key_hmac,
+                suffix=protected.suffix,
+                now=datetime.now(UTC),
+            )
+    except Exception:
+        pass
+
+
+def write_files(env_content: str, profile_content: str, all_env: dict[str, str] | None = None) -> None:
     """Записать .env и profile.yaml."""
     section("Сохранение конфигурации")
 
@@ -842,6 +865,11 @@ def write_files(env_content: str, profile_content: str) -> None:
 
     PROFILE_PATH.write_text(profile_content, encoding="utf-8")
     ok(f"Записан {bold('profile.yaml')}")
+    if all_env:
+        _sync_mistral_key_to_db(
+            all_env.get("MISTRAL_API_KEY", ""),
+            all_env.get("MISTRAL_KEYS_MASTER_KEY", ""),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -1150,6 +1178,10 @@ def _save_env(env: dict[str, str], profile: dict) -> None:
     mode = {k: env.get(k, "") for k in ("APP_MODE", "ENABLE_REAL_APPLY")}
     content = build_env(tg, llm, mode, env)
     _write_env(content)
+    _sync_mistral_key_to_db(
+        env.get("MISTRAL_API_KEY", ""),
+        env.get("MISTRAL_KEYS_MASTER_KEY", ""),
+    )
     ok(f"Настройки сохранены в {bold('.env')}")
 
 

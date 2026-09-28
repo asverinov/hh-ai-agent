@@ -99,16 +99,72 @@ def _company_url(vacancy_url: str, href: str | None) -> str:
 
 async def classify_page(page: Any) -> PageState:
     try:
+        page_url = str(getattr(page, "url", "") or "")
+        if "account/login" in page_url or "/auth" in page_url:
+            return PageState.ACCESS_DENIED
+
         checks = (
-            (PageState.CAPTCHA_DETECTED, ('form[action*="captcha"]', '[data-qa="captcha"]')),
-            (PageState.ACCESS_DENIED, ('[data-qa="access-denied"]',)),
-            (PageState.VACANCY_REMOVED, ('[data-qa="vacancy-removed"]',)),
-            (PageState.VACANCY_LOADED, ('[data-qa="vacancy-description"]',)),
+            (
+                PageState.CAPTCHA_DETECTED,
+                (
+                    'form[action*="captcha"]',
+                    '[data-qa="captcha"]',
+                    '[data-qa*="captcha"]',
+                    'iframe[src*="captcha"]',
+                    'iframe[src*="smartcaptcha"]',
+                    '.captcha-page',
+                ),
+            ),
+            (
+                PageState.ACCESS_DENIED,
+                (
+                    '[data-qa="access-denied"]',
+                    '[data-qa="error-page"]',
+                    'h1:has-text("Доступ ограничен")',
+                ),
+            ),
+            (
+                PageState.VACANCY_REMOVED,
+                (
+                    '[data-qa="vacancy-removed"]',
+                    '[data-qa="vacancy-archived"]',
+                    '[data-qa="vacancy-response-link-top-not-found"]',
+                    ':has-text("Вакансия в архиве")',
+                    ':has-text("Вакансия закрыта")',
+                    ':has-text("Вакансия перенесена в архив")',
+                    ':has-text("Страница не найдена")',
+                ),
+            ),
+            (
+                PageState.VACANCY_LOADED,
+                (
+                    '[data-qa="vacancy-description"]',
+                    '.vacancy-description',
+                    '[data-qa="vacancy-view"]',
+                    'div[data-qa="vacancy-description"]',
+                    '[data-qa="vacancy-view-description"]',
+                ),
+            ),
         )
         for state, selectors in checks:
             for selector in selectors:
                 if await page.locator(selector).is_visible():
                     return state
+
+        if hasattr(page, "wait_for_timeout"):
+            for fallback_selector, state in (
+                ('[data-qa="vacancy-description"]', PageState.VACANCY_LOADED),
+                ('.vacancy-description', PageState.VACANCY_LOADED),
+                ('[data-qa="vacancy-removed"]', PageState.VACANCY_REMOVED),
+                ('[data-qa="captcha"]', PageState.CAPTCHA_DETECTED),
+            ):
+                try:
+                    loc = page.locator(fallback_selector).first
+                    await loc.wait_for(state="visible", timeout=2000)
+                    return state
+                except Exception:
+                    pass
+
         return PageState.PAGE_STRUCTURE_CHANGED
     except Exception:
         return PageState.NETWORK_ERROR
@@ -521,16 +577,23 @@ class HHClient:
                 if state is PageState.CAPTCHA_DETECTED:
                     logger.warning("captcha_detected job_id=%s", summary.id)
                 return VacancyDetails(summary, state)
-            description = (
-                await page.locator('[data-qa="vacancy-description"]').inner_text()
-            ).strip()
+            desc_locator = page.locator('[data-qa="vacancy-description"]').first
+            if not await desc_locator.is_visible():
+                alt_locator = page.locator('.vacancy-description, [data-qa="vacancy-view"]').first
+                if await alt_locator.is_visible():
+                    desc_locator = alt_locator
+            description = (await desc_locator.inner_text()).strip()
             if not description:
                 return VacancyDetails(
                     summary,
                     PageState.PAGE_STRUCTURE_CHANGED,
                     error="vacancy description is empty",
                 )
-            company_locator = page.locator('[data-qa="vacancy-company-name"]')
+            company_locator = page.locator('[data-qa="vacancy-company-name"]').first
+            if not await company_locator.is_visible():
+                alt_company = page.locator('[data-qa="vacancy-company"]').first
+                if await alt_company.is_visible():
+                    company_locator = alt_company
             company = (
                 (await company_locator.inner_text()).strip()
                 if await company_locator.is_visible()
