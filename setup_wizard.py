@@ -653,40 +653,126 @@ def step_app_mode(current: dict[str, str]) -> dict[str, str]:
     {bold('dry_run')} {green('(рекомендуется для начала)')}
       · Бот ищет и анализирует вакансии
       · Присылает превью в Telegram
-      · {green('Никаких реальных откликов — безопасно')}
+      · {green('Никаких реальных откликов — полностью безопасно')}
 
-    {bold('approval')} (после успешного dry_run)
+    {bold('approval')} (ручное подтверждение)
       · Бот шлёт вакансию в Telegram с кнопкой «Откликнуться»
-      · {yellow('Отклик происходит только после вашего нажатия')}
+      · {yellow('Отклик происходит только после вашего нажатия в Telegram')}
       · Одноразовое подтверждение, истекает через 30 минут
+
+    {bold('auto')} (автоподача — полностью автоматический режим)
+      · {green('Автоматический отклик на вакансии с высоким совпадением (≥ 85%)')}
+      · Подача безопасными пачками по расписанию в рабочие часы
+      · Вакансии с меньшим совпадением приходят на ручной аппрув в Telegram
     """))
 
     current_mode = current.get("APP_MODE", "dry_run")
-    default = 1 if current_mode == "dry_run" else 2
+    is_auto = current.get("AUTO_APPLY_ENABLED", "false").lower() == "true"
+    if is_auto:
+        default = 3
+    elif current_mode == "approval":
+        default = 2
+    else:
+        default = 1
 
     choice = ask_choice(
         "Режим:",
         options=[
             ("dry_run", "безопасный старт — никаких реальных откликов"),
-            ("approval", "реальные отклики по вашему подтверждению"),
+            ("approval", "ручное подтверждение — отклик только по кнопке в Telegram"),
+            ("auto", "автоподача — автоматические отклики на подходящие вакансии + ручной аппрув"),
         ],
         default=default,
     )
 
-    mode = "dry_run" if choice == 1 else "approval"
-    real_apply = "true" if choice == 2 else "false"
+    if choice == 1:
+        print()
+        ok(f"Режим: {bold('dry_run')}")
+        return {
+            "APP_MODE": "dry_run",
+            "ENABLE_REAL_APPLY": "false",
+            "AUTO_APPLY_ENABLED": "false",
+        }
 
     if choice == 2:
         print()
         warn("Убедитесь что dry_run работал корректно перед включением approval!")
         if not ask_yes_no("Вы действительно хотите включить режим с реальными откликами?", default=False):
-            mode = "dry_run"
-            real_apply = "false"
             ok("Переключено на dry_run — вы всегда сможете изменить позже")
+            return {
+                "APP_MODE": "dry_run",
+                "ENABLE_REAL_APPLY": "false",
+                "AUTO_APPLY_ENABLED": "false",
+            }
+        print()
+        ok(f"Режим: {bold('approval')} (ручное подтверждение)")
+        return {
+            "APP_MODE": "approval",
+            "ENABLE_REAL_APPLY": "true",
+            "AUTO_APPLY_ENABLED": "false",
+        }
+
+    # choice == 3: auto
+    print()
+    warn("В автоматическом режиме бот будет самостоятельно отправлять отклики на HH.ru!")
+    if not ask_yes_no("Вы действительно хотите включить режим автоподачи?", default=False):
+        ok("Переключено на approval (ручное подтверждение)")
+        return {
+            "APP_MODE": "approval",
+            "ENABLE_REAL_APPLY": "true",
+            "AUTO_APPLY_ENABLED": "false",
+        }
 
     print()
-    ok(f"Режим: {bold(mode)}")
-    return {"APP_MODE": mode, "ENABLE_REAL_APPLY": real_apply}
+    info("Настройка параметров автоподачи (нажмите Enter для значений по умолчанию):")
+    min_conf = ask(
+        "Минимальный порог совпадения для автоотклика (0.50 - 1.00)",
+        default=current.get("AUTO_APPLY_MIN_CONFIDENCE", "0.85"),
+    )
+    min_batch = ask(
+        "Минимальный размер пачки откликов",
+        default=current.get("AUTO_APPLY_MIN_BATCH_SIZE", "3"),
+    )
+    max_batch = ask(
+        "Максимальный размер пачки откликов",
+        default=current.get("AUTO_APPLY_MAX_BATCH_SIZE", "5"),
+    )
+    min_int = ask(
+        "Минимальный интервал между пачками (часы)",
+        default=current.get("AUTO_APPLY_MIN_INTERVAL_HOURS", "2"),
+    )
+    max_int = ask(
+        "Максимальный интервал между пачками (часы)",
+        default=current.get("AUTO_APPLY_MAX_INTERVAL_HOURS", "4"),
+    )
+    start_hour = ask(
+        "Начало рабочего окна автоподачи (час 0-23)",
+        default=current.get("AUTO_APPLY_START_HOUR", "10"),
+    )
+    end_hour = ask(
+        "Конец рабочего окна автоподачи (час 0-23)",
+        default=current.get("AUTO_APPLY_END_HOUR", "22"),
+    )
+    timezone = ask(
+        "Часовой пояс (IANA)",
+        default=current.get("AUTO_APPLY_TIMEZONE", "Europe/Moscow"),
+    )
+
+    print()
+    ok(f"Режим: {bold('auto')} (автоподача активна)")
+    return {
+        "APP_MODE": "approval",
+        "ENABLE_REAL_APPLY": "true",
+        "AUTO_APPLY_ENABLED": "true",
+        "AUTO_APPLY_MIN_CONFIDENCE": min_conf,
+        "AUTO_APPLY_MIN_BATCH_SIZE": min_batch,
+        "AUTO_APPLY_MAX_BATCH_SIZE": max_batch,
+        "AUTO_APPLY_MIN_INTERVAL_HOURS": min_int,
+        "AUTO_APPLY_MAX_INTERVAL_HOURS": max_int,
+        "AUTO_APPLY_START_HOUR": start_hour,
+        "AUTO_APPLY_END_HOUR": end_hour,
+        "AUTO_APPLY_TIMEZONE": timezone,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -959,7 +1045,13 @@ def show_current_config(env: dict[str, str], profile: dict) -> None:
 
     mode = env.get("APP_MODE", "—")
     real_apply = env.get("ENABLE_REAL_APPLY", "false")
-    mode_display = f"{mode}" + (" + real apply" if real_apply == "true" else "")
+    auto_apply = env.get("AUTO_APPLY_ENABLED", "false").lower() == "true"
+    if auto_apply:
+        mode_display = "auto (автоподача активна + ручной аппрув)"
+    elif mode == "approval" and real_apply == "true":
+        mode_display = "approval (ручное подтверждение)"
+    else:
+        mode_display = f"{mode}" + (" + real apply" if real_apply == "true" else "")
     ok(f"Режим: {mode_display}")
 
 
@@ -981,7 +1073,7 @@ def step_advanced(current: dict[str, str]) -> dict[str, str]:
     )
     result["MAX_APPLICATIONS_PER_DAY"] = ask(
         "Максимум откликов в день",
-        default=get("MAX_APPLICATIONS_PER_DAY", "5"),
+        default=get("MAX_APPLICATIONS_PER_DAY", "20"),
     )
     result["MAX_VACANCIES_PER_QUERY"] = ask(
         "Максимум вакансий на запрос",
@@ -999,6 +1091,41 @@ def step_advanced(current: dict[str, str]) -> dict[str, str]:
         "Количество ошибок подряд для срабатывания защиты (circuit breaker)",
         default=get("CIRCUIT_BREAKER_PAGE_ERRORS", "3"),
     )
+    if current.get("AUTO_APPLY_ENABLED", "false").lower() == "true":
+        print()
+        info("Параметры автоподачи:")
+        result["AUTO_APPLY_MIN_CONFIDENCE"] = ask(
+            "Порог совпадения для автоотклика (0.50 - 1.00)",
+            default=get("AUTO_APPLY_MIN_CONFIDENCE", "0.85"),
+        )
+        result["AUTO_APPLY_MIN_BATCH_SIZE"] = ask(
+            "Минимальный размер пачки автооткликов",
+            default=get("AUTO_APPLY_MIN_BATCH_SIZE", "3"),
+        )
+        result["AUTO_APPLY_MAX_BATCH_SIZE"] = ask(
+            "Максимальный размер пачки автооткликов",
+            default=get("AUTO_APPLY_MAX_BATCH_SIZE", "5"),
+        )
+        result["AUTO_APPLY_MIN_INTERVAL_HOURS"] = ask(
+            "Минимальный интервал между пачками (часы)",
+            default=get("AUTO_APPLY_MIN_INTERVAL_HOURS", "2"),
+        )
+        result["AUTO_APPLY_MAX_INTERVAL_HOURS"] = ask(
+            "Максимальный интервал между пачками (часы)",
+            default=get("AUTO_APPLY_MAX_INTERVAL_HOURS", "4"),
+        )
+        result["AUTO_APPLY_START_HOUR"] = ask(
+            "Начало рабочего окна автоподачи (час 0-23)",
+            default=get("AUTO_APPLY_START_HOUR", "10"),
+        )
+        result["AUTO_APPLY_END_HOUR"] = ask(
+            "Конец рабочего окна автоподачи (час 0-23)",
+            default=get("AUTO_APPLY_END_HOUR", "22"),
+        )
+        result["AUTO_APPLY_TIMEZONE"] = ask(
+            "Часовой пояс автоподачи (IANA)",
+            default=get("AUTO_APPLY_TIMEZONE", "Europe/Moscow"),
+        )
     return result
 
 
@@ -1028,6 +1155,10 @@ def show_next_steps(mode: str, env: dict[str, str]) -> None:
     if mode == "dry_run":
         steps.append(f"В Telegram проверьте {cyan('/status')} — режим должен быть {bold('dry_run')}")
         steps.append(f"Дождитесь превью вакансий — {green('кнопки отклика не будет')} (это нормально)")
+    elif env.get("AUTO_APPLY_ENABLED", "false").lower() == "true":
+        conf = env.get("AUTO_APPLY_MIN_CONFIDENCE", "0.85")
+        steps.append(f"Включена {bold('автоподача')}: бот будет сам откликаться на вакансии с совпадением ≥ {conf}")
+        steps.append("Вакансии с меньшим совпадением будут приходить с кнопкой в Telegram")
     else:
         steps.append(f"В Telegram нажимайте {bold('«Откликнуться»')} только осознанно!")
 
@@ -1104,7 +1235,7 @@ def wizard_edit(existing_env: dict[str, str], existing_profile: dict) -> None:
                 ("Telegram настройки", "токен бота и User ID"),
                 ("LLM провайдер/модель", "Ollama, Mistral или OpenAI-compatible"),
                 ("Профиль кандидата", "имя, опыт, должности, запросы"),
-                ("Режим запуска", "dry_run или approval"),
+                ("Режим запуска", "dry_run, approval или auto (автоподача)"),
                 ("Расширенные настройки", "лимиты, интервалы, тайм-ауты"),
                 ("Проверить конфигурацию", "запустить --check-config"),
                 ("Выйти", ""),
