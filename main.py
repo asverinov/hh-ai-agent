@@ -1,4 +1,6 @@
 from __future__ import annotations
+
+import json
 import argparse
 import asyncio
 import hashlib
@@ -14,12 +16,11 @@ from zoneinfo import ZoneInfo
 
 from aiogram.exceptions import TelegramAPIError
 
-from ai_analyzer import AnalysisError, VacancyAnalyzer
+from ai_analyzer import AnalysisError, VacancyAnalyzer, evaluation_text
 from approval import ApprovalGuard, ApprovalService
 from browser_backend import BrowserLaunchError, create_browser_backend
 from config import ConfigError, Settings, load_settings
 from database import Database, SearchRun, VacancyStatus
-from fit_summary import normalize_fit_summary
 from hh_client import HHClient, PageState, VacancySummary
 from instance_lock import AlreadyRunningError, single_instance
 from llm.base import LLMProvider
@@ -31,6 +32,10 @@ from logging_setup import configure_logging
 from tg_bot import AgentControl, TelegramService
 from vacancy_filter import vacancy_rejection_reason
 from version import __version__
+
+# Загрузить .env в os.environ, чтобы os.getenv() работал
+from dotenv import load_dotenv as _load_dotenv
+_load_dotenv("/home/a/hh-ai-agent/.env", override=False)
 from mascots import (
     enable_pesec_mode,
     pesec_on_analyzing,
@@ -292,24 +297,63 @@ async def process_vacancy(
         )
 
     if not suitability.suitable:
-        pesec_on_reject(summary.title, reason=f"LLM: {suitability.reason}")
+        pesec_on_reject(summary.title, reason=f"LLM: {suitability.verdict}")
         database.transition(
             summary.id,
             VacancyStatus.DISCOVERED,
             VacancyStatus.REJECTED_BY_LLM,
             llm_decision=False,
-            llm_reason=suitability.reason,
+            llm_reason=suitability.verdict,
             confidence=suitability.confidence,
             error_text="",
         )
         logger.info("vacancy_rejected job_id=%s source=llm", summary.id)
+        import os as _os
+        if _os.getenv("DEBUG_SHOW_ALL", "false").lower() == "true":
+            try:
+                await telegram.notify_rejected(
+                    summary.title, summary.url, suitability.verdict,
+                    suitability.confidence,
+                    evaluation_text=evaluation_text(suitability),
+                )
+            except Exception as _exc:
+                logger.warning("notify_rejected_failed error=%s", _exc)
         return VacancyProcessResult(
-            "rejected_by_llm", suitability.reason, PageState.VACANCY_LOADED
+            "rejected_by_llm", suitability.verdict, PageState.VACANCY_LOADED
         )
 
     pesec_on_approve(summary.title, score=suitability.confidence)
 
-    fit_summary = normalize_fit_summary(suitability.fit_points)
+    by_level: dict[int, list] = {}
+    for r in suitability.requirements:
+        by_level.setdefault(r.level, []).append(r)
+    parts = []
+    for lvl in sorted(by_level.keys()):
+        items = by_level[lvl]
+        if lvl == 1:
+            score = min(r.match for r in items)
+            parts.append(f"Отсекающие: {score:.0%}")
+        else:
+            score = sum(r.match for r in items) / len(items)
+            label = items[0].label if items else ""
+            parts.append(f"{label}: {score:.0%}")
+    if not parts:
+        parts.append(f"Оценка: {suitability.verdict[:200]}")
+    fit_summary = "\n".join(parts)
+    evaluation_data = {
+        "requirements": [
+            {
+                "level": r.level,
+                "label": r.label,
+                "text": r.text,
+                "match": r.match,
+                "evidence": r.evidence,
+            }
+            for r in suitability.requirements
+        ],
+        "confidence": suitability.confidence,
+    }
+    evaluation_json = json.dumps(evaluation_data, ensure_ascii=False)
     company = await hh_client.read_company_details(details.company_url)
     database.store_company_details(
         summary.id, rating=company.rating, reviews_count=company.reviews_count
@@ -336,15 +380,16 @@ async def process_vacancy(
             summary.id,
             cover_letter=letter,
             llm_decision=True,
-            llm_reason=suitability.reason,
+            llm_reason=suitability.verdict,
             confidence=suitability.confidence,
             fit_summary=fit_summary,
+            evaluation_json=evaluation_json,
         )
     elif not database.request_approval(
         job_id=summary.id,
         cover_letter=letter,
         llm_decision=True,
-        llm_reason=suitability.reason,
+        llm_reason=suitability.verdict,
         confidence=suitability.confidence,
         fit_summary=fit_summary,
         now=now,

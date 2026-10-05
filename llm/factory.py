@@ -5,6 +5,7 @@ from llm.errors import LLMConfigurationError
 from llm.managed import ManagedLLMProvider
 from llm.mistral_keys import MistralKeyManager
 from llm.providers.ollama import OllamaProvider
+from llm.providers.anthropic_compatible import AnthropicCompatibleProvider
 from llm.providers.openai_compatible import OpenAICompatibleProvider
 
 
@@ -16,6 +17,13 @@ def create_llm_provider(settings: Settings, database: Database) -> LLMProvider:
         return MistralKeyManager(config, database)
     elif config.provider == "openai_compatible":
         adapter = OpenAICompatibleProvider(
+            config.openai_compatible_base_url,
+            config.openai_compatible_api_key,
+            json_mode=config.openai_compatible_json_mode,
+            reasoning_enabled=config.openai_compatible_reasoning_enabled,
+        )
+    elif config.provider == "anthropic_compatible":
+        adapter = AnthropicCompatibleProvider(
             config.openai_compatible_base_url,
             config.openai_compatible_api_key,
             json_mode=config.openai_compatible_json_mode,

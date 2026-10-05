@@ -20,6 +20,8 @@ from llm.errors import (
 )
 from llm.types import LLMRequest, LLMResponse
 
+_LLM_RATE_LIMIT = {"last": 0.0}
+
 
 logger = logging.getLogger(__name__)
 StructuredResult = TypeVar("StructuredResult", bound=BaseModel)
@@ -80,27 +82,53 @@ class ManagedLLMProvider:
             if row_id is None:
                 raise LLMDailyLimitError()
             try:
+                import time as _t, asyncio as _a
+                _elapsed = _t.monotonic() - _LLM_RATE_LIMIT["last"]
+                if _elapsed < 5.0:
+                    await _a.sleep(5.0 - _elapsed)
+                _LLM_RATE_LIMIT["last"] = _t.monotonic()
                 response = await self.adapter.complete(active_request)
+                logger.warning(
+                    "RAW_ANALYSIS: finish_reason=%r text_len=%s text=%r",
+                    response.finish_reason,
+                    len(response.text or ""),
+                    (response.text or "")[:2000],
+                )
+                _blacklist_markers = (
+                    "разговоры на некоторые темы временно ограничены",
+                    "ответы на вопросы, связанные с чувствительными темами",
+                    "не обладает собственным мнением",
+                )
+                _txt = (response.text or "").lower()
+                if response.finish_reason == "blacklist" or any(m in _txt for m in _blacklist_markers):
+                    logger.warning("llm_blacklist_skip provider=%s operation=%s", self.adapter.name, request.operation)
+                    raise LLMInvalidResponseError()
                 if not response.text.strip() or response.finish_reason == "length":
                     raise LLMInvalidResponseError()
                 parsed = None
                 if response_model is not None:
                     raw_text = response.text.strip()
-                    if raw_text.startswith("```"):
-                        lines = raw_text.splitlines()
-                        if lines[0].startswith("```"):
-                            lines = lines[1:]
-                        if lines and lines[-1].startswith("```"):
-                            lines = lines[:-1]
-                        raw_text = "\n".join(lines).strip()
+                    import re as _re
+                    raw_text = _re.sub(r"```(?:json)?", "", raw_text).strip()
                     first_brace = raw_text.find("{")
                     last_brace = raw_text.rfind("}")
                     if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
                         raw_text = raw_text[first_brace : last_brace + 1]
                     try:
                         parsed = response_model.model_validate_json(raw_text)
-                    except ValidationError as exc:
-                        raise LLMInvalidResponseError() from exc
+                    except ValidationError:
+                        import ast, json as _json
+                        try:
+                            # Fix Python-dict style: True/False/None -> true/false/null
+                            fixed = raw_text
+                            fixed = fixed.replace("'", '"')
+                            fixed = fixed.replace("None", "null")
+                            fixed = fixed.replace("True", "true").replace("False", "false")
+                            py_obj = _json.loads(fixed)
+                            raw_text2 = _json.dumps(py_obj, ensure_ascii=False)
+                            parsed = response_model.model_validate_json(raw_text2)
+                        except Exception as exc:
+                            raise LLMInvalidResponseError() from exc
                 self.database.complete_llm_request(
                     row_id,
                     success=True,

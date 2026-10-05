@@ -5,6 +5,10 @@ _HORIZONTAL_RULE = re.compile(r"^[ \t]*(?:-{3,}|_{3,}|\*{3,})[ \t]*$")
 _PUNCTUATION_ONLY = re.compile(r"^[ \t]*[.…。·•,:;!?-]+[ \t]*$")
 _MARKDOWN_LINK = re.compile(r"\[([^\]\n]+)\]\((https?://[^\s)]+)\)")
 _COMPLETE_ENDING = re.compile(r'(?:[.!?…][»”"\')\]]*|[🙂👋])$')
+_TRAILING_CLOSING = re.compile(
+    r"(?is)\s*(?:с\s+уважением|с\s+почтением|best\s+regards|с\s+наилучшими\s+пожеланиями)"
+    r"[,.]?\s*[\n\s]*[А-ЯЁA-Z][а-яёa-z]*(?:\s+[А-ЯЁA-Z][а-яёa-z]*){0,2}\s*[.!]?\s*$"
+)
 
 
 def letter_urls(text: str) -> set[str]:
@@ -30,6 +34,7 @@ def normalize_cover_letter_body(
     """Convert an LLM draft into clean plain text without changing its prose."""
     body = letter.replace("\r\n", "\n").replace("\r", "\n").strip()
     body = _MARKDOWN_LINK.sub(_plain_markdown_link, body)
+    body = _TRAILING_CLOSING.sub("", body).rstrip()
     if closing and body.rstrip().endswith(closing):
         body = body.rstrip()[: -len(closing)].rstrip()
     if required_url:
@@ -56,7 +61,7 @@ def normalize_cover_letter_body(
 
 
 def _body_without_footer(text: str, required_url: str, closing: str) -> str:
-    body = text.strip()
+    body = _TRAILING_CLOSING.sub("", text).strip()
     if closing and body.endswith(closing):
         body = body[: -len(closing)].rstrip()
     if required_url:

@@ -22,6 +22,30 @@ from database import Database, VacancyStatus
 
 logger = logging.getLogger(__name__)
 
+_EXPERIENCE_MAP = {
+    "без опыта": "noExperience",
+    "нет опыта": "noExperience",
+    "от 1 до 3 лет": "between1And3",
+    "1-3 года": "between1And3",
+    "1–3 года": "between1And3",
+    "от 3 до 6 лет": "between3And6",
+    "3-6 лет": "between3And6",
+    "3–6 лет": "between3And6",
+    "более 6 лет": "moreThan6",
+    "больше 6 лет": "moreThan6",
+    "от 6 лет": "moreThan6",
+}
+
+
+def _normalize_experience(values):
+    out = []
+    for v in values:
+        code = _EXPERIENCE_MAP.get(v.strip().lower())
+        if code:
+            out.append(code)
+    return out
+
+
 
 class QuestionnaireRequiredError(RuntimeError):
     """Employer questionnaire or test assignment required."""
@@ -495,11 +519,14 @@ class HHClient:
                     "text": query,
                     "order_by": "publication_time",
                     "page": page_number,
+                    "search_field": "name",
                 }
                 if areas:
                     params["area"] = list(areas)
                 if experience_filters:
-                    params["experience"] = list(experience_filters)
+                    codes = _normalize_experience(experience_filters)
+                    if codes:
+                        params["experience"] = codes
                 if remote_only:
                     params["schedule"] = "remote"
                 await self._delay()

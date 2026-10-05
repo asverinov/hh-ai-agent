@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import asyncio
 import html
 import logging
@@ -585,6 +587,35 @@ class TelegramService:
             return
         await message.answer(f"Ключ {result.id} ····{result.suffix} добавлен.")
 
+    async def notify_rejected(
+        self, title: str, url: str, reason: str, confidence: float,
+        evaluation_text: str = "",
+    ) -> None:
+        text = (
+            "\u274c <b>\u041e\u0442\u0432\u0435\u0440\u0433\u043d\u0443\u0442\u043e</b>\n"
+            f"{html.escape(title)}\n"
+            f"<a href=\"{html.escape(url, quote=True)}\">\u041e\u0442\u043a\u0440\u044b\u0442\u044c \u0432\u0430\u043a\u0430\u043d\u0441\u0438\u044e</a>\n\n"
+            f"<b>\u041f\u0440\u0438\u0447\u0438\u043d\u0430:</b> {html.escape((reason or '')[:1200])}\n\n"
+            f"<b>\u0423\u0432\u0435\u0440\u0435\u043d\u043d\u043e\u0441\u0442\u044c:</b> {confidence:.0%}"
+        )
+        if evaluation_text:
+            text += (
+                "\n\n<blockquote expandable>"
+                f"<b>\u0414\u0435\u0442\u0430\u043b\u0438 \u043e\u0446\u0435\u043d\u043a\u0438</b>\n"
+                f"{html.escape(evaluation_text)}"
+                "</blockquote>"
+            )
+        try:
+            await self.bot.send_message(
+                chat_id=self.settings.tg_user_id,
+                text=text,
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+            logger.info("rejected_sent")
+        except Exception as exc:
+            logger.warning("notify_rejected_failed error=%s", exc)
+
     async def send_preview(self, vacancy: Vacancy, include_actions: bool) -> None:
         if is_pesec_enabled():
             pesec_img = get_pesec_image("approve")
@@ -658,6 +689,25 @@ class TelegramService:
         ]
 
     @classmethod
+    @staticmethod
+    def _evaluation_text(vacancy: Vacancy) -> str:
+        """Разбирает evaluation_json (плоская схема) и возвращает таблицу."""
+        if not vacancy.evaluation_json:
+            return ""
+        try:
+            data = json.loads(vacancy.evaluation_json)
+        except Exception:
+            return ""
+        try:
+            from ai_analyzer import evaluation_text_from_requirements
+            requirements = data.get("requirements") or []
+            if not requirements:
+                return ""
+            return evaluation_text_from_requirements(requirements)
+        except Exception:
+            return ""
+
+    @classmethod
     def _rich_card(cls, vacancy: Vacancy) -> InputRichMessage:
         company_blocks = [
             InputRichBlockParagraph(
@@ -691,6 +741,14 @@ class TelegramService:
                 InputRichBlockParagraph(
                     text=[RichTextBold(text="Уверенность: "), cls._confidence(vacancy)]
                 ),
+                *(
+                    [InputRichBlockDetails(
+                        summary="Детали оценки",
+                        blocks=[InputRichBlockParagraph(text=cls._evaluation_text(vacancy))],
+                        is_open=False,
+                    )]
+                    if cls._evaluation_text(vacancy) else []
+                ),
                 InputRichBlockDetails(
                     summary="Сопроводительное письмо",
                     blocks=[InputRichBlockParagraph(text=vacancy.cover_letter)],
@@ -716,7 +774,12 @@ class TelegramService:
             f"{company_text}\n\n"
             f"<b>Почему мне подходит</b>\n{fit_text}\n"
             f"Уверенность: {cls._confidence(vacancy)}\n\n"
-            f"<b>Сопроводительное письмо</b>\n{html.escape(vacancy.cover_letter)}"
+            + (
+                f"<blockquote expandable><b>Детали оценки</b>\n"
+                f"{html.escape(cls._evaluation_text(vacancy))}</blockquote>\n\n"
+                if cls._evaluation_text(vacancy) else ""
+            )
+            + f"<b>Сопроводительное письмо</b>\n{html.escape(vacancy.cover_letter)}"
         )
 
     async def notify(self, text: str) -> None:
