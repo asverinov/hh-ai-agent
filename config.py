@@ -319,8 +319,15 @@ def load_settings(
         errors.append("BROWSER_BACKEND must be cloakbrowser or playwright")
 
     llm_provider = values.get("LLM_PROVIDER", "ollama").strip().lower()
-    if llm_provider not in {"ollama", "mistral", "openai_compatible"}:
-        errors.append("LLM_PROVIDER must be ollama, mistral or openai_compatible")
+    if llm_provider not in {
+        "ollama",
+        "mistral",
+        "openai_compatible",
+        "anthropic_compatible",
+    }:
+        errors.append(
+            "LLM_PROVIDER must be ollama, mistral, openai_compatible or anthropic_compatible"
+        )
     llm_model = values.get("LLM_MODEL", "").strip()
     if not llm_model and llm_provider == "ollama":
         llm_model = values.get("OLLAMA_MODEL", "llama3").strip()
@@ -343,7 +350,7 @@ def load_settings(
             errors.append("MISTRAL_KEYS_MASTER_KEY must be a valid Fernet key")
         if mistral_base_url:
             validate_endpoint("MISTRAL_BASE_URL", mistral_base_url, https_only=True)
-    elif llm_provider == "openai_compatible":
+    elif llm_provider in {"openai_compatible", "anthropic_compatible"}:
         if not compatible_base_url:
             errors.append("OPENAI_COMPATIBLE_BASE_URL is required")
         else:

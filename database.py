@@ -53,6 +53,7 @@ class Vacancy:
     error_text: str
     analysis_retry_count: int
     analysis_next_retry_at: str | None
+    evaluation_json: str = ""
 
 
 @dataclass(frozen=True)
@@ -439,6 +440,7 @@ class Database:
             error_text=row["error_text"],
             analysis_retry_count=row["analysis_retry_count"],
             analysis_next_retry_at=row["analysis_next_retry_at"],
+            evaluation_json=row["evaluation_json"],
         )
 
     def discover(
@@ -635,12 +637,14 @@ class Database:
         llm_reason: str,
         confidence: float,
         fit_summary: str = "",
+        evaluation_json: str = "",
     ) -> bool:
         with self._connect() as connection:
             cursor = connection.execute(
                 """
                 UPDATE vacancies SET cover_letter = ?, llm_decision = ?,
-                    llm_reason = ?, fit_summary = ?, confidence = ?, error_text = '',
+                    llm_reason = ?, fit_summary = ?, confidence = ?,
+                    evaluation_json = ?, error_text = '',
                     analysis_next_retry_at = NULL
                 WHERE id = ? AND status = ?
                 """,
@@ -650,6 +654,7 @@ class Database:
                     llm_reason,
                     fit_summary,
                     confidence,
+                    evaluation_json,
                     job_id,
                     VacancyStatus.DISCOVERED.value,
                 ),
