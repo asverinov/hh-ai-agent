@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import aiohttp
 import logging
 import random
 import re
 import tempfile
+import yaml
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -68,6 +70,9 @@ class VacancySummary:
     url: str
     search_query: str
     previously_sent: bool = False
+    salary_from: int | None = None
+    salary_to: int | None = None
+    salary_currency: str = ""
 
 
 @dataclass(frozen=True)
@@ -194,6 +199,42 @@ async def classify_page(page: Any) -> PageState:
         return PageState.NETWORK_ERROR
 
 
+
+_JUNIOR_TITLE_MARKERS = (
+    "координатор",
+    "администратор проект",
+    "ассистент",
+    "помощник руководител",
+    "стажёр",
+    "стажер",
+    "интерн",
+    "junior",
+)
+
+
+def _is_junior_title(title: str) -> str | None:
+    normalized = title.casefold()
+    return next((m for m in _JUNIOR_TITLE_MARKERS if m in normalized), None)
+
+
+def _parse_salary(item: dict[str, Any]) -> tuple[int | None, int | None, str]:
+    salary = item.get("salary") or {}
+    if not isinstance(salary, dict):
+        return None, None, ""
+    s_from = salary.get("from")
+    s_to = salary.get("to")
+    cur = str(salary.get("currency") or "")
+    try:
+        s_from = int(s_from) if s_from is not None else None
+    except (TypeError, ValueError):
+        s_from = None
+    try:
+        s_to = int(s_to) if s_to is not None else None
+    except (TypeError, ValueError):
+        s_to = None
+    return s_from, s_to, cur
+
+
 class HHClient:
     def __init__(
         self,
@@ -211,11 +252,231 @@ class HHClient:
         self.approval_guard = approval_guard
         self.sleep = sleep
         self.now_factory = now_factory or (lambda: datetime.now(UTC))
+        self._http_session: aiohttp.ClientSession | None = None
+        self._access_token: str = (settings.hh_access_token or "").strip()
+        self._refresh_token: str = (settings.hh_refresh_token or "").strip()
+        self._token_expires_at: int = int(settings.hh_token_expires_at or 0)
 
     async def _delay(self) -> None:
         await self.sleep(
             self.settings.min_seconds_between_actions + random.uniform(0.5, 2.5)
         )
+
+    async def _get_http_session(self) -> aiohttp.ClientSession:
+        if self._http_session is None or self._http_session.closed:
+            self._http_session = aiohttp.ClientSession(
+                timeout=aiohttp.ClientTimeout(total=30),
+                headers={"User-Agent": "hh-ai-agent/1.0 (asverinov@mail.ru)"},
+            )
+        return self._http_session
+
+    async def close(self) -> None:
+        if self._http_session is not None and not self._http_session.closed:
+            await self._http_session.close()
+        self._http_session = None
+
+    def _read_active_resume(self) -> dict[str, str] | None:
+        path = self.settings.resumes_config_path
+        if not path.exists():
+            logger.warning("resumes_config_not_found path=%s", path)
+            return None
+        try:
+            data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+        except (OSError, yaml.YAMLError) as exc:
+            logger.error("resumes_config_read_failed path=%s error=%s", path, exc)
+            return None
+        resumes = data.get("resumes") or {}
+        for code, item in resumes.items():
+            if isinstance(item, dict) and item.get("active"):
+                resume_id = str(item.get("id", "")).strip()
+                if not resume_id:
+                    logger.error("resume_active_but_no_id code=%s", code)
+                    return None
+                return {
+                    "code": str(code),
+                    "id": resume_id,
+                    "title": str(item.get("title", code)),
+                }
+        logger.warning("no_active_resume_in_config path=%s", path)
+        return None
+
+    async def _refresh_token_if_needed(self) -> bool:
+        now_ms = int(self.now_factory().timestamp() * 1000)
+        if self._access_token and self._token_expires_at > now_ms + 60_000:
+            return True
+        if not self._refresh_token:
+            logger.error("hh_token_missing_and_no_refresh")
+            return False
+
+        session = await self._get_http_session()
+        try:
+            async with session.post(
+                "https://api.hh.ru/oauth/token",
+                data={
+                    "grant_type": "refresh_token",
+                    "refresh_token": self._refresh_token,
+                },
+            ) as resp:
+                payload = await resp.json()
+                if resp.status != 200:
+                    logger.error(
+                        "hh_token_refresh_failed status=%s body=%s",
+                        resp.status,
+                        payload,
+                    )
+                    return False
+        except (aiohttp.ClientError, asyncio.TimeoutError) as exc:
+            logger.error("hh_token_refresh_network_error error=%s", exc)
+            return False
+
+        new_access = str(payload.get("access_token", "")).strip()
+        new_refresh = str(payload.get("refresh_token", self._refresh_token)).strip()
+        expires_in = int(payload.get("expires_in", 0) or 0)
+        if not new_access:
+            logger.error("hh_token_refresh_empty_access_token")
+            return False
+
+        self._access_token = new_access
+        self._refresh_token = new_refresh
+        self._token_expires_at = now_ms + expires_in * 1000
+        logger.info("hh_token_refreshed expires_in=%s", expires_in)
+        return True
+
+    async def _fetch_similar_page(
+        self,
+        resume_id: str,
+        page: int,
+        per_page: int = 100,
+    ) -> dict[str, Any]:
+        session = await self._get_http_session()
+        url = f"https://api.hh.ru/resumes/{resume_id}/similar_vacancies"
+        headers = {"Authorization": f"Bearer {self._access_token}"}
+        exp_codes = _normalize_experience(
+            self.settings.profile.hh.experience_filters
+        )
+        params: list[tuple[str, Any]] = [
+            ("page", page),
+            ("per_page", per_page),
+        ]
+        for code in exp_codes:
+            params.append(("experience", code))
+        async with session.get(
+            url, params=params, headers=headers
+        ) as resp:
+            payload = await resp.json()
+            if resp.status != 200:
+                raise RuntimeError(
+                    f"similar_vacancies HTTP {resp.status}: {payload}"
+                )
+            return payload
+
+    async def search_vacancies_by_resume(self) -> VacancySearchResult:
+        resume = self._read_active_resume()
+        if resume is None:
+            return VacancySearchResult([], 0, 0, "no_active_resume")
+        if not await self._refresh_token_if_needed():
+            return VacancySearchResult([], 0, 0, "auth_error")
+
+        resume_code = resume["code"]
+        resume_id = resume["id"]
+        query_label = f"similar_vacancies:{resume_code}"
+        allowed_exp: set[str] = set(
+            _normalize_experience(
+                self.settings.profile.hh.experience_filters
+            )
+        )
+
+        results: list[VacancySummary] = []
+        found_results = 0
+        duplicates = 0
+        seen_ids: set[str] = set()
+
+        try:
+            for page_number in range(self.settings.max_pages_per_query):
+                await self._delay()
+                payload = await self._fetch_similar_page(
+                    resume_id, page_number, per_page=100
+                )
+                items = payload.get("items") or []
+                if not items:
+                    break
+                for item in items:
+                    job_id = str(item.get("id") or "").strip()
+                    title = str(item.get("name") or "").strip()
+                    url = str(item.get("alternate_url") or "").strip()
+                    if not job_id or not title or not url:
+                        continue
+                    item_exp = (item.get("experience") or {}).get("id")
+                    if allowed_exp and item_exp and item_exp not in allowed_exp:
+                        logger.debug(
+                            "skip_experience_mismatch job_id=%s exp=%s allowed=%s",
+                            job_id, item_exp, sorted(allowed_exp),
+                        )
+                        continue
+                    if marker := _is_junior_title(title):
+                        logger.info(
+                            "skip_junior_title job_id=%s marker=%s title=%r",
+                            job_id, marker, title,
+                        )
+                        continue
+                    s_from, s_to, s_cur = _parse_salary(item)
+                    peek = s_to if s_to is not None else s_from
+                    if peek is not None and peek < self.settings.hh_salary_hard_min:
+                        logger.info(
+                            "skip_low_salary job_id=%s salary=%s..%s %s hard_min=%s",
+                            job_id, s_from, s_to, s_cur, self.settings.hh_salary_hard_min,
+                        )
+                        continue
+                    found_results += 1
+                    if job_id in seen_ids:
+                        duplicates += 1
+                        continue
+                    seen_ids.add(job_id)
+                    existing = self.database.get(job_id)
+                    if existing is not None:
+                        duplicates += 1
+                        if (
+                            existing.status is VacancyStatus.PENDING_APPROVAL
+                            and len(results) < self.settings.max_vacancies_per_query
+                        ):
+                            results.append(
+                                VacancySummary(
+                                    job_id, title, url, query_label, True
+                                )
+                            )
+                        continue
+                    if len(results) < self.settings.max_vacancies_per_query:
+                        results.append(
+                            VacancySummary(
+                                job_id, title, url, query_label,
+                                salary_from=s_from,
+                                salary_to=s_to,
+                                salary_currency=s_cur,
+                            )
+                        )
+                if len(results) >= self.settings.max_vacancies_per_query:
+                    break
+
+            logger.info(
+                "search_by_resume_finished resume=%s found=%s new=%s duplicates=%s",
+                resume_code,
+                found_results,
+                len(results),
+                duplicates,
+            )
+            return VacancySearchResult(results, found_results, duplicates)
+        except Exception as exc:
+            logger.error(
+                "search_by_resume_failed resume=%s error=%s",
+                resume_code,
+                exc,
+            )
+            return VacancySearchResult(
+                results,
+                found_results,
+                duplicates,
+                f"similar_error:{type(exc).__name__}",
+            )
 
     async def ensure_login(self) -> bool:
         page = await self.context.new_page()

@@ -122,6 +122,13 @@ class Settings:
     circuit_breaker_unknown_ratio: float
     circuit_breaker_page_errors: int
     profile: Profile
+    hh_access_token: str = ""
+    hh_refresh_token: str = ""
+    hh_token_expires_at: int = 0
+    hh_use_similar_vacancies: bool = True
+    resumes_config_path: Path = BASE_DIR / "config" / "resumes.yaml"
+    hh_salary_hard_min: int = 200000
+    hh_salary_soft_min: int = 250000
 
     @property
     def ollama_url(self) -> str:
@@ -464,6 +471,12 @@ def load_settings(
     if not hh.search_queries:
         errors.append("hh.search_queries must not be empty")
 
+    try:
+        _hh_token_expires_at = int(
+            values.get("HH_TOKEN_EXPIRES_AT", "0").strip() or "0"
+        )
+    except (ValueError, TypeError):
+        _hh_token_expires_at = 0
     settings = Settings(
         tg_bot_token=required("TG_BOT_TOKEN"),
         tg_user_id=tg_user_id,
@@ -526,6 +539,15 @@ def load_settings(
             "CIRCUIT_BREAKER_PAGE_ERRORS", "3"
         ),
         profile=Profile(candidate, hh, cover_letter),
+        hh_access_token=values.get("HH_ACCESS_TOKEN", "").strip(),
+        hh_refresh_token=values.get("HH_REFRESH_TOKEN", "").strip(),
+        hh_token_expires_at=_hh_token_expires_at,
+        hh_use_similar_vacancies=boolean("HH_USE_SIMILAR_VACANCIES", "true"),
+        resumes_config_path=_path(
+            values.get("RESUMES_CONFIG_PATH", "config/resumes.yaml")
+        ),
+        hh_salary_hard_min=positive_integer("HH_SALARY_HARD_MIN", "200000"),
+        hh_salary_soft_min=positive_integer("HH_SALARY_SOFT_MIN", "250000"),
     )
     if errors:
         raise ConfigError("Configuration error:\n- " + "\n- ".join(dict.fromkeys(errors)))

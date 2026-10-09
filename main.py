@@ -240,6 +240,9 @@ async def process_vacancy(
             description_hash=description_hash,
             search_query=summary.search_query,
             discovered_at=now,
+            salary_from=getattr(summary, "salary_from", None),
+            salary_to=getattr(summary, "salary_to", None),
+            salary_currency=getattr(summary, "salary_currency", "") or "",
         ):
             return VacancyProcessResult("ignored")
         logger.info("vacancy_discovered job_id=%s", summary.id)
@@ -276,6 +279,40 @@ async def process_vacancy(
         logger.info("vacancy_rejected job_id=%s source=filter", summary.id)
         return VacancyProcessResult(
             "rejected_by_filter", rejection, PageState.VACANCY_LOADED
+        )
+
+    # ---- salary soft-min pre-check: skip LLM, send short card ----
+    _peek = summary.salary_to if summary.salary_to is not None else summary.salary_from
+    if (
+        _peek is not None
+        and _peek < settings.hh_salary_soft_min
+        and _peek >= settings.hh_salary_hard_min
+    ):
+        try:
+            await telegram.notify_low_salary(
+                summary.title, summary.url,
+                summary.salary_from, summary.salary_to, summary.salary_currency,
+                settings.hh_salary_soft_min,
+            )
+        except Exception as exc:
+            logger.warning("notify_low_salary_failed job_id=%s error=%s", summary.id, exc)
+        database.transition(
+            summary.id,
+            VacancyStatus.DISCOVERED,
+            VacancyStatus.SKIPPED,
+            llm_decision=False,
+            llm_reason=f"low_salary:{_peek}",
+            confidence=None,
+            error_text="",
+        )
+        logger.info(
+            "vacancy_skipped_low_salary job_id=%s peek=%s soft_min=%s",
+            summary.id, _peek, settings.hh_salary_soft_min,
+        )
+        return VacancyProcessResult(
+            "skipped_low_salary",
+            f"low_salary:{_peek}",
+            PageState.VACANCY_LOADED,
         )
 
     try:
@@ -521,12 +558,15 @@ async def run_search_cycle(
             ):
                 break
             logger.info("search_query_started query=%r", query)
-            search = await hh_client.search_vacancies(
-                query,
-                settings.profile.hh.areas,
-                settings.profile.hh.experience_filters,
-                remote_only=settings.profile.hh.remote_only,
-            )
+            if settings.hh_use_similar_vacancies:
+                search = await hh_client.search_vacancies_by_resume()
+            else:
+                search = await hh_client.search_vacancies(
+                    query,
+                    settings.profile.hh.areas,
+                    settings.profile.hh.experience_filters,
+                    remote_only=settings.profile.hh.remote_only,
+                )
             stats.query_count += 1
             stats.found_results += search.found_results
             stats.new_vacancies += sum(
