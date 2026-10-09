@@ -15,6 +15,7 @@ from llm.base import ProviderAdapter
 from llm.errors import (
     LLMDailyLimitError,
     LLMError,
+    LLMBlacklistError,
     LLMInvalidResponseError,
     LLMRateLimitError,
 )
@@ -97,12 +98,14 @@ class ManagedLLMProvider:
                 _blacklist_markers = (
                     "разговоры на некоторые темы временно ограничены",
                     "ответы на вопросы, связанные с чувствительными темами",
+                    "собственным мнением",
+                    "чувствительные темы могут быть ограничены",
                     "не обладает собственным мнением",
                 )
                 _txt = (response.text or "").lower()
                 if response.finish_reason == "blacklist" or any(m in _txt for m in _blacklist_markers):
                     logger.warning("llm_blacklist_skip provider=%s operation=%s", self.adapter.name, request.operation)
-                    raise LLMInvalidResponseError()
+                    raise LLMBlacklistError()
                 if not response.text.strip() or response.finish_reason == "length":
                     raise LLMInvalidResponseError()
                 parsed = None
@@ -114,21 +117,61 @@ class ManagedLLMProvider:
                     last_brace = raw_text.rfind("}")
                     if first_brace != -1 and last_brace != -1 and last_brace > first_brace:
                         raw_text = raw_text[first_brace : last_brace + 1]
+                    import re as _re
+                    # Pre-fix: лишняя скобка "), -> ", (частая глючка GigaChat)
+                    raw_text = _re.sub(r'"\)\s*,', '",', raw_text)
+                    # Fix missing ']' before "verdict" (GigaChat glitch):
+                    #   ...{"level": N}}, "verdict": ...
+                    # -> ...{"level": N}], "verdict": ...
+                    raw_text = _re.sub(
+                        r'\}\s*\}\s*,\s*("verdict"\s*:)',
+                        r'}], \1',
+                        raw_text,
+                    )
+
+                    parsed = None
+                    last_err: Exception | None = None
+
+                    # Attempt 1: strict
                     try:
                         parsed = response_model.model_validate_json(raw_text)
-                    except ValidationError:
-                        import ast, json as _json
+                    except Exception as e:
+                        last_err = e
+
+                    # Attempt 2: json-repair (лучший для LLM)
+                    if parsed is None:
                         try:
-                            # Fix Python-dict style: True/False/None -> true/false/null
-                            fixed = raw_text
-                            fixed = fixed.replace("'", '"')
-                            fixed = fixed.replace("None", "null")
+                            from json_repair import repair_json as _repair
+                            fixed = _repair(raw_text, return_objects=False)
+                            parsed = response_model.model_validate_json(fixed)
+                        except Exception as e:
+                            last_err = e
+
+                    # Attempt 3: dirtyjson
+                    if parsed is None:
+                        try:
+                            import dirtyjson as _dirtyjson
+                            obj = _dirtyjson.loads(raw_text)
+                            parsed = response_model.model_validate(obj)
+                        except Exception as e:
+                            last_err = e
+
+                    # Attempt 4: python-dict fixes
+                    if parsed is None:
+                        try:
+                            import json as _json
+                            fixed = raw_text.replace("'", '"').replace("None", "null")
                             fixed = fixed.replace("True", "true").replace("False", "false")
-                            py_obj = _json.loads(fixed)
-                            raw_text2 = _json.dumps(py_obj, ensure_ascii=False)
-                            parsed = response_model.model_validate_json(raw_text2)
-                        except Exception as exc:
-                            raise LLMInvalidResponseError() from exc
+                            parsed = response_model.model_validate_json(fixed)
+                        except Exception as e:
+                            last_err = e
+
+                    if parsed is None:
+                        logger.warning(
+                            "json_parse_failed raw_head=%r raw_tail=%r err=%s",
+                            raw_text[:200], raw_text[-200:], last_err,
+                        )
+                        raise LLMInvalidResponseError() from last_err
                 self.database.complete_llm_request(
                     row_id,
                     success=True,
