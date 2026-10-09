@@ -54,6 +54,10 @@ class Vacancy:
     analysis_retry_count: int
     analysis_next_retry_at: str | None
     evaluation_json: str = ""
+    salary_from: int | None = None
+    salary_to: int | None = None
+    salary_currency: str = ""
+
 
 
 @dataclass(frozen=True)
@@ -169,6 +173,9 @@ class Database:
                 CREATE TABLE IF NOT EXISTS vacancies (
                     id TEXT PRIMARY KEY,
                     title TEXT NOT NULL,
+                    salary_from INTEGER,
+                    salary_to INTEGER,
+                    salary_currency TEXT NOT NULL DEFAULT '',
                     company TEXT NOT NULL DEFAULT '',
                     company_url TEXT NOT NULL DEFAULT '',
                     company_rating REAL,
@@ -293,6 +300,9 @@ class Database:
                 "fit_summary": "TEXT NOT NULL DEFAULT ''",
                 "analysis_retry_count": "INTEGER NOT NULL DEFAULT 0",
                 "analysis_next_retry_at": "TEXT",
+                "salary_from": "INTEGER",
+                "salary_to": "INTEGER",
+                "salary_currency": "TEXT NOT NULL DEFAULT ''",
             }
             for name, definition in migrations.items():
                 if name not in columns:
@@ -338,6 +348,9 @@ class Database:
             CREATE TABLE vacancies (
                 id TEXT PRIMARY KEY,
                 title TEXT NOT NULL,
+                salary_from INTEGER,
+                salary_to INTEGER,
+                salary_currency TEXT NOT NULL DEFAULT '',
                 company TEXT NOT NULL DEFAULT '',
                 company_url TEXT NOT NULL DEFAULT '',
                 company_rating REAL,
@@ -423,6 +436,9 @@ class Database:
             url=row["url"],
             description_hash=row["description_hash"],
             search_query=row["search_query"],
+            salary_from=row["salary_from"] if "salary_from" in row.keys() else None,
+            salary_to=row["salary_to"] if "salary_to" in row.keys() else None,
+            salary_currency=(row["salary_currency"] if "salary_currency" in row.keys() else "") or "",
             llm_decision=None if row["llm_decision"] is None else bool(row["llm_decision"]),
             llm_reason=row["llm_reason"],
             fit_summary=row["fit_summary"],
@@ -454,14 +470,17 @@ class Database:
         description_hash: str,
         search_query: str,
         discovered_at: datetime,
+        salary_from: int | None = None,
+        salary_to: int | None = None,
+        salary_currency: str = "",
     ) -> bool:
         with self._connect() as connection:
             cursor = connection.execute(
                 """
                 INSERT OR IGNORE INTO vacancies (
                     id, title, company, company_url, url, description_hash, search_query,
-                    status, discovered_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    status, discovered_at, salary_from, salary_to, salary_currency
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     job_id,
@@ -473,6 +492,9 @@ class Database:
                     search_query,
                     VacancyStatus.DISCOVERED.value,
                     _iso(discovered_at),
+                    salary_from,
+                    salary_to,
+                    salary_currency,
                 ),
             )
             return cursor.rowcount == 1

@@ -18,3 +18,29 @@ venv/
 env/
 .vscode/
 .idea/
+
+# Local backups
+*.bak
+*.bak-*
+*.db.bak-*
+.env.bak-*
+
+# Local data
+agent.db
+agent.db-journal
+agent.db-wal
+.env
+config/
+.browser-profile/
+
+# Local debug scripts (patch/fix/replay)
+patch_v*.py
+fix_*.py
+apply_patch.py
+enable_approval.py
+replay_suitable.py
+smoke_similar.py
+
+# Logs
+*.log
+/tmp/agent_*.log
