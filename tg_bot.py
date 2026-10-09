@@ -286,6 +286,15 @@ class TelegramService:
                 if callback.message:
                     await callback.message.edit_reply_markup(reply_markup=None)
             else:
+                if not result.ok:
+                    title_txt = vacancy.title if vacancy else job_id
+                    reason = (result.message or "").strip() or "\u043d\u0435\u0438\u0437\u0432\u0435\u0441\u0442\u043d\u0430\u044f \u043f\u0440\u0438\u0447\u0438\u043d\u0430"
+                    try:
+                        await self.notify(
+                            f"\u2717 \u041e\u0442\u043a\u043b\u0438\u043a \u043d\u0435 \u043e\u0442\u043f\u0440\u0430\u0432\u043b\u0435\u043d: {title_txt}. \u041f\u0440\u0438\u0447\u0438\u043d\u0430: {reason}"
+                        )
+                    except Exception as exc:
+                        logger.warning("notify_apply_failure_failed job_id=%s error=%s", job_id, exc)
                 if vacancy and vacancy.error_text == "questionnaire_required":
                     await self.notify_questionnaire_required(vacancy.title, vacancy.url)
                     if callback.message:
@@ -587,6 +596,47 @@ class TelegramService:
             return
         await message.answer(f"Ключ {result.id} ····{result.suffix} добавлен.")
 
+
+    @staticmethod
+    def _fmt_salary(s_from: int | None, s_to: int | None, cur: str) -> str | None:
+        if s_from is None and s_to is None:
+            return None
+        symbol = {"RUR": "\u20bd", "USD": "$", "EUR": "\u20ac", "KZT": "\u20b8"}.get(cur, cur)
+        def fmt(v: int) -> str:
+            return f"{v:,}".replace(",", " ")
+        if s_from is not None and s_to is not None:
+            return f"{fmt(s_from)} \u2013 {fmt(s_to)} {symbol}".strip()
+        if s_from is not None:
+            return f"\u043e\u0442 {fmt(s_from)} {symbol}".strip()
+        return f"\u0434\u043e {fmt(s_to)} {symbol}".strip()
+
+    async def notify_low_salary(
+        self, title: str, url: str,
+        salary_from: int | None, salary_to: int | None,
+        salary_currency: str, soft_min: int,
+    ) -> None:
+        salary_str = self._fmt_salary(salary_from, salary_to, salary_currency) or "не указана"
+        soft_min_str = f"{soft_min:,}".replace(",", " ")
+        text = (
+            "\u26a0\ufe0f <b>\u041d\u0438\u0437\u043a\u0430\u044f \u0432\u0438\u043b\u043a\u0430</b>\n"
+            f"{html.escape(title)}\n"
+            f"<a href=\"{html.escape(url, quote=True)}\">\u041e\u0442\u043a\u0440\u044b\u0442\u044c \u0432\u0430\u043a\u0430\u043d\u0441\u0438\u044e</a>\n\n"
+            f"<b>\u0417\u0430\u0440\u043f\u043b\u0430\u0442\u0430:</b> {html.escape(salary_str)}\n"
+            f"<b>\u041f\u043e\u0440\u043e\u0433:</b> {soft_min_str} \u20bd (soft-min)\n\n"
+            "AI-\u043e\u0446\u0435\u043d\u043a\u0430 \u043d\u0435 \u043f\u0440\u043e\u0432\u043e\u0434\u0438\u043b\u0430\u0441\u044c. "
+            "\u041f\u043e\u0434\u0430\u0432\u0430\u0442\u044c\u0441\u044f \u0442\u043e\u043b\u044c\u043a\u043e \u0435\u0441\u043b\u0438 \u0433\u043e\u0442\u043e\u0432\u044b \u043e\u0431\u0441\u0443\u0436\u0434\u0430\u0442\u044c \u0433\u0440\u0435\u0439\u0434."
+        )
+        try:
+            await self.bot.send_message(
+                chat_id=self.settings.tg_user_id,
+                text=text,
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+            logger.info("low_salary_sent")
+        except Exception as exc:
+            logger.warning("notify_low_salary_failed error=%s", exc)
+
     async def notify_rejected(
         self, title: str, url: str, reason: str, confidence: float,
         evaluation_text: str = "",
@@ -720,6 +770,16 @@ class TelegramService:
                     text=[RichTextBold(text="Рейтинг HH: "), rating]
                 )
             )
+        if salary := cls._fmt_salary(
+            getattr(vacancy, "salary_from", None),
+            getattr(vacancy, "salary_to", None),
+            getattr(vacancy, "salary_currency", "") or "",
+        ):
+            company_blocks.append(
+                InputRichBlockParagraph(
+                    text=[RichTextBold(text="Зарплата: "), salary]
+                )
+            )
         return InputRichMessage(
             skip_entity_detection=True,
             blocks=[
@@ -764,6 +824,12 @@ class TelegramService:
         company_text = f"<b>Компания</b>\nКомпания: {company}"
         if rating:
             company_text += f"\nРейтинг HH: {rating}"
+        if salary := cls._fmt_salary(
+            getattr(vacancy, "salary_from", None),
+            getattr(vacancy, "salary_to", None),
+            getattr(vacancy, "salary_currency", "") or "",
+        ):
+            company_text += f"\nЗарплата: {html.escape(salary)}"
         fit_text = "\n".join(
             f"<b>{html.escape(category)}:</b> {html.escape(value)}"
             for category, value in cls._fit_lines(vacancy)
