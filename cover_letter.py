@@ -1,6 +1,19 @@
 import re
 
 
+
+
+def _normalize_closing(s: str) -> str:
+    """Нормализует closing: убирает \r, пробелы по краям строк, схлопывает пустые строки, тримит."""
+    if not s:
+        return ""
+    s = s.replace("\r\n", "\n").replace("\r", "\n")
+    s = "\n".join(line.rstrip() for line in s.split("\n"))
+    while "\n\n\n" in s:
+        s = s.replace("\n\n\n", "\n\n")
+    return s.strip()
+
+
 _HORIZONTAL_RULE = re.compile(r"^[ \t]*(?:-{3,}|_{3,}|\*{3,})[ \t]*$")
 _PUNCTUATION_ONLY = re.compile(r"^[ \t]*[.…。·•,:;!?-]+[ \t]*$")
 _MARKDOWN_LINK = re.compile(r"\[([^\]\n]+)\]\((https?://[^\s)]+)\)")
@@ -78,7 +91,9 @@ def cover_letter_validation_error(
 ) -> str:
     if not text.strip():
         return "cover_letter_empty"
-    if len(text) > max_length:
+    # Мягкий допуск: GigaChat плохо соблюдает точные лимиты, поэтому
+    # разрешаем письмо до max_length + 300 знаков. Жёсткий лимит — отсекаем.
+    if len(text) > max_length + 300:
         return "cover_letter_too_long"
     if "```" in text or _MARKDOWN_LINK.search(text):
         return "cover_letter_markdown"
@@ -87,7 +102,8 @@ def cover_letter_validation_error(
             return "cover_letter_layout_artifact"
     if not has_required_portfolio(text, required_url):
         return "required_portfolio_missing"
-    if closing and not text.rstrip().endswith(closing):
+    _nc = _normalize_closing(closing)
+    if _nc and not _normalize_closing(text).endswith(_nc):
         return "required_closing_missing"
     body = _body_without_footer(text, required_url, closing)
     if not body:
