@@ -257,10 +257,27 @@ class TelegramService:
         if action == "mk":
             await self._mistral_key_callback(callback, (callback.data or "").split(":"))
             return
+        if action == "show_pending":
+            await self._show_pending_callback(callback)
+            return
         if not separator or action not in {"apply", "skip", "edit"} or not job_id:
             await self._answer_callback(
                 callback, "Некорректное действие.", show_alert=True
             )
+            return
+        # Вежливый отказ на неактуальные карточки (вакансия уже не pending_approval)
+        current = self.database.get(job_id)
+        if current is None or current.status.value != "pending_approval":
+            await self._answer_callback(
+                callback,
+                "Вакансия неактуальна (уже обработана). Кнопки отключены.",
+                show_alert=True,
+            )
+            if callback.message:
+                try:
+                    await callback.message.edit_reply_markup(reply_markup=None)
+                except Exception as exc:
+                    logger.debug("stale_card_markup_clear_failed error=%s", exc)
             return
         if action == "apply":
             # Отвечаем на callback немедленно — Telegram требует ответ в течение ~10 сек,
@@ -283,7 +300,14 @@ class TelegramService:
                         except Exception as exc:
                             logger.debug("pesec_applied_failed error=%s", exc)
                 _title = vacancy.title if vacancy else job_id
-                await self.notify(f"✓ Отклик отправлен: {_title}")
+                _msg = f"✓ Отклик отправлен: {_title}"
+                if callback.message:
+                    try:
+                        await callback.message.reply(_msg)
+                    except Exception:
+                        await self.notify(_msg)
+                else:
+                    await self.notify(_msg)
                 if callback.message:
                     await callback.message.edit_reply_markup(reply_markup=None)
             else:
@@ -302,7 +326,14 @@ class TelegramService:
                         await callback.message.edit_reply_markup(reply_markup=None)
                 else:
                     _title = vacancy.title if vacancy else job_id
-                    await self.notify(f"✗ {_title}: {result.message}")
+                    _msg = f"✗ {_title}: {result.message}"
+                    if callback.message:
+                        try:
+                            await callback.message.reply(_msg)
+                        except Exception:
+                            await self.notify(_msg)
+                    else:
+                        await self.notify(_msg)
         elif action == "edit":
             self._mistral_key_input = None
             await callback.answer("Пришлите новый текст сопроводительного письма сообщением (или /cancel):", show_alert=True)
@@ -315,10 +346,24 @@ class TelegramService:
                     if not has_required_portfolio(
                         new_letter, self.settings.profile.cover_letter.required_portfolio_url
                     ):
-                        await self.notify("Письмо не сохранено: добавьте обязательную ссылку на портфолио.")
+                        _msg = "Письмо не сохранено: добавьте обязательную ссылку на портфолио."
+                        if callback.message:
+                            try:
+                                await callback.message.reply(_msg)
+                            except Exception:
+                                await self.notify(_msg)
+                        else:
+                            await self.notify(_msg)
                         return
                     self.database.update_cover_letter(job_id, new_letter)
-                    await self.notify("✓ Сопроводительное письмо обновлено!")
+                    if callback.message:
+                        try:
+                            await callback.message.reply("✓ Сопроводительное письмо обновлено!")
+                        except Exception as exc:
+                            logger.warning("reply_updated_failed error=%s", exc)
+                            await self.notify("✓ Сопроводительное письмо обновлено!")
+                    else:
+                        await self.notify("✓ Сопроводительное письмо обновлено!")
                     updated_vacancy = self.database.get(job_id)
                     if updated_vacancy:
                         await self.send_preview(updated_vacancy, include_actions=True)
@@ -849,6 +894,114 @@ class TelegramService:
             )
             + f"<b>Сопроводительное письмо</b>\n{html.escape(vacancy.cover_letter)}"
         )
+
+    async def _show_pending_callback(self, callback: CallbackQuery) -> None:
+        pending = sorted(
+            self.database.pending(),
+            key=lambda v: (v.confidence or 0.0),
+            reverse=True,
+        )
+        if not pending:
+            await self._answer_callback(
+                callback, "Нет рекомендованных вакансий.", show_alert=True
+            )
+            return
+        lines = [f"\U0001F4CB <b>Актуальные вакансии ({len(pending)}):</b>\n"]
+        for i, v in enumerate(pending, 1):
+            conf = f"{v.confidence:.0%}" if v.confidence is not None else "\u2014"
+            salary = ""
+            if v.salary_from or v.salary_to:
+                s_from = v.salary_from or "?"
+                s_to = v.salary_to or "?"
+                salary = f" \u00b7 {s_from}\u2013{s_to}"
+            url = html.escape(v.url, quote=True)
+            title = html.escape((v.title or "")[:70])
+            company = html.escape((v.company or "\u2014")[:40])
+            lines.append(f"{i}. <a href=\"{url}\">{title}</a>\n   {company} \u00b7 {conf}{salary}")
+        text = "\n".join(lines)
+        if len(text) > 4000:
+            text = text[:3980] + "\n\u2026"
+        try:
+            await self.bot.send_message(
+                chat_id=self.settings.tg_user_id,
+                text=text,
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+            await callback.answer("Список отправлен")
+        except Exception as exc:
+            logger.warning("show_pending_failed error=%s", exc)
+            await callback.answer("Не удалось отправить список", show_alert=True)
+
+    async def notify_bootstrap(self, stats: dict[str, int], pending_count: int) -> None:
+        def g(k: str) -> int:
+            return stats.get(k, 0)
+        text = (
+            "\U0001F680 <b>Агент запущен</b>\n\n"
+            "<b>Состояние БД:</b>\n"
+            f"\u2022 \u2705 Откликнуто: {g('applied')}\n"
+            f"\u2022 \U0001F4E5 Ждут решения: {g('pending_approval')}\n"
+            f"\u2022 \u274C Отклонено LLM: {g('rejected_by_llm')}\n"
+            f"\u2022 \u274C Отклонено фильтром: {g('rejected_by_filter')}\n"
+            f"\u2022 \u23ED Пропущено: {g('skipped')}\n"
+            f"\u2022 \u26A0\uFE0F Ошибок: {g('analysis_failed') + g('apply_failed')}"
+            f" (analysis_failed {g('analysis_failed')}, apply_failed {g('apply_failed')})\n"
+            f"\u2022 \U0001F195 В очереди на анализ: {g('discovered')}\n\n"
+        )
+        if pending_count:
+            text += f"Отправляю {pending_count} карточек рекомендаций\u2026"
+        else:
+            text += "Рекомендаций в очереди нет."
+        try:
+            await self.bot.send_message(
+                chat_id=self.settings.tg_user_id,
+                text=text,
+                parse_mode="HTML",
+                disable_web_page_preview=True,
+            )
+        except Exception as exc:
+            logger.warning("bootstrap_notify_failed error=%s", exc)
+
+    async def notify_cycle_done(
+        self,
+        run: "SearchRun",
+        pending_count: int,
+        next_run_at: "datetime | None",
+    ) -> None:
+        ts = datetime.now().strftime("%H:%M")
+        parts = [
+            f"\U0001F4CA <b>Цикл завершён</b> ({ts})",
+            f"\u2022 Найдено на hh.ru: {run.found_results}",
+            f"\u2022 Новых: {run.new_vacancies}",
+            f"\u2022 Запросов: {run.query_count}",
+            f"\u2022 Рекомендовано (в TG): {run.telegram_cards}",
+            f"\u2022 Отклонено LLM: {run.rejected_by_llm}",
+            f"\u2022 Отклонено фильтром: {run.rejected_by_filter}",
+            f"\u2022 Ошибок: {run.error_count}",
+            "",
+            f"\U0001F4E5 В очереди на ваше решение: {pending_count}",
+        ]
+        if next_run_at is not None:
+            parts.append(f"\u23F0 Следующая проверка: {next_run_at.strftime('%H:%M')}")
+        text = "\n".join(parts)
+        keyboard = InlineKeyboardMarkup(
+            inline_keyboard=[[
+                InlineKeyboardButton(
+                    text="\U0001F4CB Показать рекомендованные",
+                    callback_data="show_pending",
+                ),
+            ]]
+        )
+        try:
+            await self.bot.send_message(
+                chat_id=self.settings.tg_user_id,
+                text=text,
+                parse_mode="HTML",
+                reply_markup=keyboard,
+                disable_web_page_preview=True,
+            )
+        except Exception as exc:
+            logger.warning("cycle_notify_failed error=%s", exc)
 
     async def notify(self, text: str) -> None:
         try:
