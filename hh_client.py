@@ -1008,6 +1008,32 @@ class HHClient:
                 'a[data-qa="vacancy-response-link-top"], button[data-qa="vacancy-response-link-top"]'
             ).first
             if not await response_button.is_visible():
+                # Кнопки нет — возможно, уже откликнулись.
+                already_marker = page.locator(
+                    '[data-qa="vacancy-response-link-view-topic"], '
+                    '[data-qa="vacancy-response-success"], '
+                    'text=Вы откликнулись'
+                ).first
+                if await already_marker.is_visible():
+                    now_apply = self.now_factory()
+                    self.database.mark_applied_external(
+                        permission.job_id,
+                        vacancy.title or "",
+                        vacancy.url or "",
+                        now_apply,
+                    )
+                    self.database.complete_application(
+                        permission.job_id,
+                        permission.permit,
+                        success=True,
+                        now=now_apply,
+                        error_text="already_applied_detected",
+                    )
+                    logger.info(
+                        "application_already_exists job_id=%s",
+                        permission.job_id,
+                    )
+                    return True
                 raise RuntimeError("application response control was not found")
             if not self.database.mark_submit_attempt(
                 permission.job_id,
@@ -1047,6 +1073,13 @@ class HHClient:
                 ):
                     raise RuntimeError("application status could not be completed")
                 logger.info("application_sent job_id=%s", permission.job_id)
+                self.database.mark_applied_external(
+                    permission.job_id,
+                    vacancy.title or "",
+                    vacancy.url or "",
+                    self.now_factory(),
+                )
+                logger.info("applied_jobs_recorded job_id=%s", permission.job_id)
                 return True
 
             resume_name = self.settings.profile.hh.resume_name
@@ -1118,6 +1151,13 @@ class HHClient:
             ):
                 raise RuntimeError("application status could not be completed")
             logger.info("application_sent job_id=%s", permission.job_id)
+            self.database.mark_applied_external(
+                permission.job_id,
+                vacancy.title or "",
+                vacancy.url or "",
+                self.now_factory(),
+            )
+            logger.info("applied_jobs_recorded job_id=%s", permission.job_id)
             return True
         except QuestionnaireRequiredError as exc:
             response_still_available = False
@@ -1167,6 +1207,107 @@ class HHClient:
                         permission.job_id,
                         exc,
                     )
+
+    async def fetch_negotiations_ids(self, max_pages: int = 20) -> set[str]:
+        """Возвращает id всех вакансий с откликом (включая ручные).
+
+        Пробует несколько селекторов карточек — hh.ru периодически меняет data-qa.
+        При неудаче дампит все data-qa с 'negotiat' в лог для дальнейшей отладки.
+        """
+        page = await self.context.new_page()
+        ids: set[str] = set()
+        page_num = 0
+        card_selector_used: str | None = None
+        try:
+            await self._delay()
+            while page_num < max_pages:
+                url = f"https://hh.ru/applicant/negotiations?page={page_num}"
+                try:
+                    await page.goto(url, wait_until="domcontentloaded", timeout=30_000)
+                except Exception as exc:
+                    logger.warning("negotiations_goto_failed page=%s error=%s", page_num, exc)
+                    break
+                await self._delay()
+
+                # Пробуем разные селекторы карточек
+                cards = []
+                for sel in (
+                    'div[data-qa="negotiations-item"]',
+                    '[data-qa*="negotiations-item"]',
+                    '[data-qa*="negotiation"][data-qa*="item"]',
+                    'li[data-qa*="negotiation"]',
+                ):
+                    found = await page.locator(sel).all()
+                    if found:
+                        cards = found
+                        card_selector_used = sel
+                        break
+
+                if not cards:
+                    # Диагностика: что вообще есть на странице
+                    qas = await page.evaluate(
+                        "() => Array.from(document.querySelectorAll('[data-qa]'))"
+                        ".map(e => e.getAttribute('data-qa'))"
+                        ".filter(q => q && q.toLowerCase().includes('negotiat'))"
+                    )
+                    if qas:
+                        logger.info(
+                            "negotiations_data_qa page=%s qa=%s",
+                            page_num, sorted(set(qas)),
+                        )
+                    # Fallback: считаем все ссылки на /vacancy/ внутри main
+                    links = await page.locator('a[href*="/vacancy/"]').all()
+                    added = 0
+                    for link in links:
+                        href = await link.get_attribute("href")
+                        if not href:
+                            continue
+                        m = re.search(r"/vacancy/(\d+)", href)
+                        if m and m.group(1) not in ids:
+                            ids.add(m.group(1))
+                            added += 1
+                    logger.info(
+                        "negotiations_fallback_links page=%s links=%s added=%s total=%s",
+                        page_num, len(links), added, len(ids),
+                    )
+                    if added == 0:
+                        break
+                    page_num += 1
+                    continue
+
+                new_on_page = 0
+                for card in cards:
+                    link = card.locator('a[data-qa="negotiations-item-vacancy-link"]')
+                    if await link.count() == 0:
+                        link = card.locator('a[href*="/vacancy/"]')
+                    if await link.count() == 0:
+                        continue
+                    href = await link.first.get_attribute("href")
+                    if not href:
+                        continue
+                    m = re.search(r"/vacancy/(\d+)", href)
+                    if m:
+                        before = len(ids)
+                        ids.add(m.group(1))
+                        if len(ids) > before:
+                            new_on_page += 1
+                logger.info(
+                    "negotiations_page page=%s selector=%r cards=%s new=%s total=%s",
+                    page_num, card_selector_used, len(cards), new_on_page, len(ids),
+                )
+                if new_on_page == 0:
+                    break
+                page_num += 1
+        except Exception as exc:
+            logger.error("negotiations_fetch_failed error=%s", exc)
+        finally:
+            try:
+                await page.close()
+            except Exception:
+                pass
+        logger.info("negotiations_fetch_done total=%s pages=%s", len(ids), page_num)
+        return ids
+
 
     async def check_messages(
         self, notifier: Callable[[str], Awaitable[None]]

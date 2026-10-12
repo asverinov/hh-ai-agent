@@ -282,7 +282,8 @@ class TelegramService:
                             )
                         except Exception as exc:
                             logger.debug("pesec_applied_failed error=%s", exc)
-                await self.notify("✓ Отклик отправлен")
+                _title = vacancy.title if vacancy else job_id
+                await self.notify(f"✓ Отклик отправлен: {_title}")
                 if callback.message:
                     await callback.message.edit_reply_markup(reply_markup=None)
             else:
@@ -300,7 +301,8 @@ class TelegramService:
                     if callback.message:
                         await callback.message.edit_reply_markup(reply_markup=None)
                 else:
-                    await self.notify(f"✗ {result.message}")
+                    _title = vacancy.title if vacancy else job_id
+                    await self.notify(f"✗ {_title}: {result.message}")
         elif action == "edit":
             self._mistral_key_input = None
             await callback.answer("Пришлите новый текст сопроводительного письма сообщением (или /cancel):", show_alert=True)

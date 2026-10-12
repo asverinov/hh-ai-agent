@@ -761,7 +761,9 @@ class Database:
                 return ClaimResult(False, "real_apply_disabled", vacancy)
             if row is None or row["status"] != VacancyStatus.APPROVED.value:
                 return ClaimResult(False, "invalid_status", vacancy)
-            if not row["approval_requested_at"] or not row["approved_at"]:
+            # approval_requested_at — это «когда показали карточку»,
+            # не критично для claim. Проверяем только approved_at.
+            if not row["approved_at"]:
                 return ClaimResult(False, "missing_approval", vacancy)
             if telegram_user_id != expected_user_id or row["approver_id"] != expected_user_id:
                 return ClaimResult(False, "wrong_user", vacancy)
@@ -1091,6 +1093,60 @@ class Database:
                     VacancyStatus.EXPIRED.value,
                     VacancyStatus.APPROVED.value,
                     _iso(now),
+                ),
+            )
+            return cursor.rowcount
+
+    # ------------------------------------------------------------------
+    # applied_jobs — чёрный список вакансий, куда уже был отклик
+    # (включая ручные отклики, синхронизированные с hh.ru)
+    # ------------------------------------------------------------------
+    def mark_applied_external(
+        self, job_id: str, title: str, url: str, now: datetime
+    ) -> bool:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                INSERT OR IGNORE INTO applied_jobs (id, title, url, applied_at)
+                VALUES (?, ?, ?, ?)
+                """,
+                (job_id, title or "", url or "", _iso(now)),
+            )
+            return cursor.rowcount > 0
+
+    def is_applied(self, job_id: str) -> bool:
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT 1 FROM applied_jobs WHERE id = ? LIMIT 1",
+                (job_id,),
+            ).fetchone()
+            return row is not None
+
+    def get_applied_ids(self) -> set[str]:
+        with self._connect() as connection:
+            return {
+                row[0]
+                for row in connection.execute("SELECT id FROM applied_jobs").fetchall()
+            }
+
+    def skip_existing_by_applied(
+        self, applied_ids: set[str], now: datetime
+    ) -> int:
+        """Пометить skipped те pending_approval, что уже есть в applied_jobs."""
+        if not applied_ids:
+            return 0
+        placeholders = ",".join("?" * len(applied_ids))
+        with self._connect() as connection:
+            cursor = connection.execute(
+                f"""
+                UPDATE vacancies
+                SET status = ?
+                WHERE status = ? AND id IN ({placeholders})
+                """,
+                (
+                    VacancyStatus.SKIPPED.value,
+                    VacancyStatus.PENDING_APPROVAL.value,
+                    *applied_ids,
                 ),
             )
             return cursor.rowcount
