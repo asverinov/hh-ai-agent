@@ -211,6 +211,10 @@ async def process_vacancy(
     clock = now_factory or (lambda: datetime.now(UTC))
     now = clock()
     existing = database.get(summary.id)
+    # Pre-check: если вакансия в applied_jobs — не дёргаем hh.ru, не анализируем.
+    if database.is_applied(summary.id):
+        logger.info("skipped_already_applied job_id=%s", summary.id)
+        return VacancyProcessResult("ignored")
     if summary.previously_sent:
         if existing is None or existing.status is not VacancyStatus.PENDING_APPROVAL:
             return VacancyProcessResult("ignored")
@@ -551,16 +555,59 @@ async def run_search_cycle(
                     vacancy.search_query,
                 )
             )
-        for query in settings.profile.hh.search_queries:
-            if control.paused or (
-                auto_apply_batch_limit is not None
-                and stats.auto_applications >= auto_apply_batch_limit
-            ):
-                break
-            logger.info("search_query_started query=%r", query)
-            if settings.hh_use_similar_vacancies:
+        # Back-pressure: не дёргаем hh.ru, если очередь pending уже полна
+        max_pending = getattr(settings, "max_pending_recommendations", 30)
+        pending_count = len(database.pending())
+        if pending_count >= max_pending:
+            logger.info(
+                "backpressure_skip_fetch pending=%s limit=%s",
+                pending_count, max_pending,
+            )
+        elif settings.hh_use_similar_vacancies:
+            # Один вызов — не крутим цикл по всем search_queries впустую
+            if not control.paused:
+                logger.info("search_by_resume_started resume=RP")
                 search = await hh_client.search_vacancies_by_resume()
-            else:
+                stats.query_count += 1
+                stats.found_results += search.found_results
+                stats.new_vacancies += sum(
+                    not summary.previously_sent for summary in search.summaries
+                )
+                stats.duplicates += search.duplicates
+                logger.info(
+                    "search_by_resume_finished found=%s new=%s duplicates=%s",
+                    search.found_results,
+                    sum(not s.previously_sent for s in search.summaries),
+                    search.duplicates,
+                )
+                if search.error_reason:
+                    stats.record_error(search.error_reason)
+                    control.consecutive_search_errors += 1
+                else:
+                    control.consecutive_search_errors = 0
+                if (
+                    control.consecutive_search_errors
+                    >= settings.circuit_breaker_page_errors
+                ):
+                    circuit_reason = "search_errors"
+                    state = "paused_by_circuit_breaker"
+                    control.paused = True
+                    control.circuit_reason = circuit_reason
+                for summary in search.summaries:
+                    if control.paused or (
+                        auto_apply_batch_limit is not None
+                        and stats.auto_applications >= auto_apply_batch_limit
+                    ):
+                        break
+                    await process(summary)
+        else:
+            for query in settings.profile.hh.search_queries:
+                if control.paused or (
+                    auto_apply_batch_limit is not None
+                    and stats.auto_applications >= auto_apply_batch_limit
+                ):
+                    break
+                logger.info("search_query_started query=%r", query)
                 search = await hh_client.search_vacancies(
                     query,
                     settings.profile.hh.areas,
@@ -855,6 +902,30 @@ async def run(settings: Settings) -> None:
             settings, database, approval_service, control, mistral_keys=mistral_keys
         )
         analyzer = VacancyAnalyzer(settings, llm_provider)
+
+        # Синхронизация applied_jobs с hh.ru (включая ручные отклики)
+        try:
+            applied_ids = await hh_client.fetch_negotiations_ids()
+            if applied_ids:
+                now_sync = datetime.now(UTC)
+                new_count = 0
+                for vid in applied_ids:
+                    if database.mark_applied_external(vid, "", "", now_sync):
+                        new_count += 1
+                logger.info(
+                    "applied_jobs_synced total=%s new=%s",
+                    len(applied_ids), new_count,
+                )
+                skipped = database.skip_existing_by_applied(applied_ids, now_sync)
+                if skipped:
+                    logger.info(
+                        "applied_jobs_skipped_pending count=%s", skipped,
+                    )
+            else:
+                logger.info("applied_jobs_synced total=0 (пусто)")
+        except Exception as exc:
+            logger.warning("applied_jobs_sync_skipped error=%s", exc)
+
         if mistral_keys is not None:
             mistral_keys.set_notifier(telegram.notify)
         if hasattr(telegram, "check_updates"):
