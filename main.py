@@ -218,11 +218,11 @@ async def process_vacancy(
     if summary.previously_sent:
         if existing is None or existing.status is not VacancyStatus.PENDING_APPROVAL:
             return VacancyProcessResult("ignored")
-        try:
-            await telegram.send_preview(existing, include_actions=True)
-        except TelegramAPIError:
-            return VacancyProcessResult("other_error", "telegram_error")
-        return VacancyProcessResult("telegram_card")
+        # Карточка уже висит в TG с bootstrap или была отправлена ранее.
+        # НЕ переотправляем — иначе одна и та же вакансия копится в чате.
+        # Актуальный список — через кнопку «📋 Показать рекомендованные».
+        logger.info("card_resend_skipped job_id=%s", summary.id)
+        return VacancyProcessResult("ignored")
     if existing is not None and (
         existing.status is not VacancyStatus.DISCOVERED
         or existing.llm_decision is not None
@@ -847,6 +847,14 @@ async def agent_loop(
                 + timedelta(minutes=settings.check_interval_minutes)
             )
             wake_timeout_seconds = settings.check_interval_minutes * 60
+            # Уведомление после каждого цикла (с inline-кнопкой "Показать рекомендованные")
+            try:
+                pending_count = len(database.pending())
+                await telegram.notify_cycle_done(
+                    run, pending_count, control.next_run_at
+                )
+            except Exception as exc:
+                logger.warning("cycle_notify_failed error=%s", exc)
         wake_received = False
         try:
             await asyncio.wait_for(
@@ -902,6 +910,29 @@ async def run(settings: Settings) -> None:
             settings, database, approval_service, control, mistral_keys=mistral_keys
         )
         analyzer = VacancyAnalyzer(settings, llm_provider)
+
+        # Bootstrap: сообщить о старте + отправить все pending_approval в TG
+        # Делаем ДО синхронизации applied_jobs (она занимает ~2.5 минуты)
+        try:
+            stats = database.stats()
+            pending_vacancies = sorted(
+                database.pending(),
+                key=lambda v: (v.confidence or 0.0),
+                reverse=True,
+            )
+            await telegram.notify_bootstrap(stats, len(pending_vacancies))
+            for v in pending_vacancies:
+                try:
+                    await telegram.send_preview(v, include_actions=True)
+                except Exception as exc:
+                    logger.warning(
+                        "bootstrap_card_failed job_id=%s error=%s", v.id, exc,
+                    )
+            logger.info(
+                "bootstrap_done pending_cards=%s", len(pending_vacancies),
+            )
+        except Exception as exc:
+            logger.warning("bootstrap_failed error=%s", exc)
 
         # Синхронизация applied_jobs с hh.ru (включая ручные отклики)
         try:
