@@ -44,3 +44,11 @@ smoke_similar.py
 # Logs
 *.log
 /tmp/agent_*.log
+
+# local backups
+*.bak-*
+*.broken-*
+agent.db.before-*
+agent.db.full-backup-*
+profile.yaml.bak-*
+profile.yaml.broken-*
