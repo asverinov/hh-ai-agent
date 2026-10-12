@@ -124,10 +124,19 @@ _COVER_LETTER_SYSTEM = """Ты пишешь ТЕЛО сопроводитель�
 class Requirement(BaseModel):
     model_config = ConfigDict(strict=True, extra="forbid", frozen=True)
     level: int = Field(ge=1, le=7)
-    label: str = Field(min_length=1, max_length=100)
-    text: str = Field(min_length=1, max_length=300)
+    label: str = Field(min_length=1, max_length=150)
+    text: str = Field(min_length=1, max_length=500)
     match: float = Field(ge=0.0, le=1.0)
-    evidence: str = Field(default="", max_length=120)
+    evidence: str = Field(default="", max_length=500)
+
+    @field_validator("level", mode="before")
+    @classmethod
+    def _clamp_level(cls, v: object) -> int:
+        try:
+            n = int(v)
+        except (TypeError, ValueError):
+            return 1
+        return max(1, min(7, n))
 
     @field_validator("evidence", mode="before")
     @classmethod
@@ -305,6 +314,10 @@ class VacancyAnalyzer:
                 "обязательное наличие X, локация не Москва без удалёнки.\n"
                 "3) level=2..7 — остальные требования. Уровни 2–4 — самые важные, 5–7 — менее. "
                 "Максимум 6 уровней.\n"
+                "ВАЖНО: level — ТОЛЬКО целое число от 1 до 7. "
+                "Больше 7 НЕ БЫВАЕТ. Если в вакансии больше 7 групп требований — "
+                "объединяй их в существующие уровни (1–7). "
+                "НЕ используй level=8, level=9, level=10.\n"
                 "4) label — название уровня (для группировки, одинаковый для всех элементов уровня).\n"
                 "5) match — ОЦЕНКА по шкале (промежуточные значения — норма, не исключение):\n"
                 "   1.0 — полное соответствие: прямой опыт, подтверждённый фактами из профиля;\n"
