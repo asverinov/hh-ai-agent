@@ -7,7 +7,7 @@ from datetime import datetime
 from typing import Protocol
 
 from config import Settings
-from cover_letter import has_required_portfolio
+from cover_letter import has_required_portfolio, cover_letter_validation_error
 from database import ClaimResult, Database
 
 
@@ -85,6 +85,20 @@ class ApprovalService:
             vacancy.cover_letter, self.settings.profile.cover_letter.required_portfolio_url
         ):
             return ApprovalResult(False, "В письме отсутствует обязательная ссылка на портфолио")
+        if vacancy is not None:
+            _cl = self.settings.profile.cover_letter
+            _err = cover_letter_validation_error(
+                vacancy.cover_letter,
+                _cl.required_portfolio_url,
+                _cl.closing,
+                _cl.max_length,
+            )
+            if _err:
+                logger.warning(
+                    "application_blocked job_id=%s reason=cover_letter_invalid err=%s",
+                    job_id, _err,
+                )
+                return ApprovalResult(False, f"Письмо не прошло валидацию: {_err}")
         permit = self.database.approve(
             job_id,
             telegram_user_id,
@@ -121,6 +135,19 @@ class ApprovalService:
         ):
             logger.warning("auto_application_blocked job_id=%s reason=portfolio", job_id)
             return ApprovalResult(False, "В письме отсутствует обязательная ссылка на портфолио")
+        _cl = self.settings.profile.cover_letter
+        _err = cover_letter_validation_error(
+            vacancy.cover_letter,
+            _cl.required_portfolio_url,
+            _cl.closing,
+            _cl.max_length,
+        )
+        if _err:
+            logger.warning(
+                "auto_application_blocked job_id=%s reason=cover_letter_invalid err=%s",
+                job_id, _err,
+            )
+            return ApprovalResult(False, f"Письмо не прошло валидацию: {_err}")
         permit = self.database.approve(
             job_id,
             self.settings.tg_user_id,
