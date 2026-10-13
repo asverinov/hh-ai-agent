@@ -23,6 +23,24 @@ hh:
   experience_filters: []
   # Restrict HH search to vacancies marked as remote work.
   remote_only: false
+  # Vacancies with a known salary below hard_min are skipped entirely
+  # (no LLM call, no Telegram card). Set to 0 to disable the check.
+  salary_hard_min: 200000
+  # Vacancies with a known salary below soft_min get a short notification
+  # but no LLM analysis. Set to 0 to disable the check.
+  # Must be >= salary_hard_min.
+  salary_soft_min: 250000
+  # Substring markers (case-insensitive) that identify junior / non-lead
+  # roles by title. Empty list disables the filter.
+  junior_title_markers:
+    - "координатор"
+    - "администратор проект"
+    - "ассистент"
+    - "помощник руководител"
+    - "стажёр"
+    - "стажер"
+    - "интерн"
+    - "junior"
 
 cover_letter:
   language: "ru"

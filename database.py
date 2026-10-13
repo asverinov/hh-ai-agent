@@ -200,7 +200,8 @@ class Database:
                     permit_hash TEXT,
                     error_text TEXT NOT NULL DEFAULT '',
                     analysis_retry_count INTEGER NOT NULL DEFAULT 0,
-                    analysis_next_retry_at TEXT
+                    analysis_next_retry_at TEXT,
+                    evaluation_json TEXT NOT NULL DEFAULT ''
                 )
                 """
             )
@@ -303,6 +304,7 @@ class Database:
                 "salary_from": "INTEGER",
                 "salary_to": "INTEGER",
                 "salary_currency": "TEXT NOT NULL DEFAULT ''",
+                "evaluation_json": "TEXT NOT NULL DEFAULT ''",
             }
             for name, definition in migrations.items():
                 if name not in columns:
@@ -456,7 +458,9 @@ class Database:
             error_text=row["error_text"],
             analysis_retry_count=row["analysis_retry_count"],
             analysis_next_retry_at=row["analysis_next_retry_at"],
-            evaluation_json=row["evaluation_json"],
+            evaluation_json=(
+                row["evaluation_json"] if "evaluation_json" in row.keys() else ""
+            ),
         )
 
     def discover(
