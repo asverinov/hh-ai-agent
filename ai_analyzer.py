@@ -5,7 +5,7 @@ import logging
 from dataclasses import asdict, replace
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from config import Settings
 from cover_letter import format_portfolio_footer, letter_urls
@@ -145,6 +145,16 @@ class Requirement(BaseModel):
             return v[:117].rstrip() + "..."
         return v
 
+    @field_validator("match", mode="before")
+    @classmethod
+    def _coerce_match(cls, v: object) -> object:
+        if isinstance(v, str):
+            try:
+                return float(v.replace(",", ".").strip())
+            except (TypeError, ValueError):
+                return 0.0
+        return v
+
 
 class SuitabilityResult(BaseModel):
     model_config = ConfigDict(strict=True, extra="forbid", frozen=True)
@@ -152,6 +162,34 @@ class SuitabilityResult(BaseModel):
     requirements: list[Requirement] = Field(default_factory=list)
     verdict: str = Field(min_length=1, max_length=1500)
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize(cls, data: object) -> object:
+        if not isinstance(data, dict):
+            return data
+        root_keys = {"suitable", "requirements", "verdict", "confidence"}
+        req_keys = {"level", "label", "text", "match", "evidence"}
+        data = dict(data)
+        for k in list(data.keys()):
+            if k not in root_keys:
+                data.pop(k, None)
+        reqs = data.get("requirements")
+        if isinstance(reqs, list):
+            cleaned_reqs = []
+            for r in reqs:
+                if isinstance(r, dict):
+                    r = {k: v for k, v in r.items() if k in req_keys}
+                cleaned_reqs.append(r)
+            data["requirements"] = cleaned_reqs
+        verdict = data.get("verdict")
+        if not (isinstance(verdict, str) and verdict.strip()):
+            data["verdict"] = (
+                "Подаваться."
+                if data.get("suitable") is True
+                else "Не подаваться. Причина: модель не вернула verdict."
+            )
+        return data
 
 
 def calculate_confidence(result: SuitabilityResult) -> float:
