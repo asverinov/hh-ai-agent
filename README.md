@@ -1,4 +1,12 @@
-# HH AI Agent
+# HH AI Agent (personal fork)
+
+> **Fork notice.** Это форк [fikstt2/hh-ai-agent](https://github.com/fikstt2/hh-ai-agent).
+> Основная линия развития — здесь, в `asverinov/hh-ai-agent`.
+> Расширения форка: multi-model pipeline (GigaChat-2-Pro для извлечения требований,
+> GigaChat-3-Ultra для оценки), deterministic post-processing, observability
+> через таблицу `llm_calls`, TG-UX с bootstrap/reply/notifications, applied_jobs-фильтр,
+> back-pressure на очередь рекомендаций. Upstream используется как источник
+> cherry-pick для независимых фиксов.
 
 Агент автоматически ищет вакансии на HH.ru, оценивает их через LLM, генерирует сопроводительные письма и присылает подходящие в Telegram.
 
