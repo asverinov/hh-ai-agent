@@ -200,21 +200,9 @@ async def classify_page(page: Any) -> PageState:
 
 
 
-_JUNIOR_TITLE_MARKERS = (
-    "координатор",
-    "администратор проект",
-    "ассистент",
-    "помощник руководител",
-    "стажёр",
-    "стажер",
-    "интерн",
-    "junior",
-)
-
-
-def _is_junior_title(title: str) -> str | None:
+def _is_junior_title(title: str, markers: tuple[str, ...]) -> str | None:
     normalized = title.casefold()
-    return next((m for m in _JUNIOR_TITLE_MARKERS if m in normalized), None)
+    return next((m for m in markers if m in normalized), None)
 
 
 def _parse_salary(item: dict[str, Any]) -> tuple[int | None, int | None, str]:
@@ -413,7 +401,9 @@ class HHClient:
                             job_id, item_exp, sorted(allowed_exp),
                         )
                         continue
-                    if marker := _is_junior_title(title):
+                    if marker := _is_junior_title(
+                        title, self.settings.profile.hh.junior_title_markers
+                    ):
                         logger.info(
                             "skip_junior_title job_id=%s marker=%s title=%r",
                             job_id, marker, title,
@@ -421,10 +411,10 @@ class HHClient:
                         continue
                     s_from, s_to, s_cur = _parse_salary(item)
                     peek = s_to if s_to is not None else s_from
-                    if peek is not None and peek < self.settings.hh_salary_hard_min:
+                    if peek is not None and peek < self.settings.profile.hh.salary_hard_min:
                         logger.info(
                             "skip_low_salary job_id=%s salary=%s..%s %s hard_min=%s",
-                            job_id, s_from, s_to, s_cur, self.settings.hh_salary_hard_min,
+                            job_id, s_from, s_to, s_cur, self.settings.profile.hh.salary_hard_min,
                         )
                         continue
                     found_results += 1

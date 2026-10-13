@@ -47,6 +47,23 @@ class HHProfile:
     areas: tuple[str, ...]
     experience_filters: tuple[str, ...]
     remote_only: bool = False
+    # Salary filter thresholds (0 disables the corresponding check).
+    # Configurable via profile.yaml under `hh:` with legacy fallback to
+    # HH_SALARY_HARD_MIN / HH_SALARY_SOFT_MIN environment variables.
+    salary_hard_min: int = 200_000
+    salary_soft_min: int = 250_000
+    # Title substrings that mark a vacancy as a junior / non-lead role.
+    # Configurable via profile.yaml under `hh:`; empty tuple disables the filter.
+    junior_title_markers: tuple[str, ...] = (
+        "координатор",
+        "администратор проект",
+        "ассистент",
+        "помощник руководител",
+        "стажёр",
+        "стажер",
+        "интерн",
+        "junior",
+    )
 
 
 @dataclass(frozen=True)
@@ -127,8 +144,6 @@ class Settings:
     hh_token_expires_at: int = 0
     hh_use_similar_vacancies: bool = True
     resumes_config_path: Path = BASE_DIR / "config" / "resumes.yaml"
-    hh_salary_hard_min: int = 200000
-    hh_salary_soft_min: int = 250000
 
     @property
     def ollama_url(self) -> str:
@@ -402,6 +417,63 @@ def load_settings(
         errors.append("hh.remote_only must be true or false")
         remote_only_value = False
 
+    # Salary filter thresholds (profile.yaml first, env fallback, defaults last).
+    def _int_or(value: object, fallback: int, field: str) -> int:
+        if value is None or value == "":
+            return fallback
+        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+            errors.append(f"{field} must be a non-negative integer")
+            return fallback
+        return value
+
+    _env_hard = values.get("HH_SALARY_HARD_MIN", "200000")
+    try:
+        _env_hard_int = int(_env_hard)
+    except (TypeError, ValueError):
+        errors.append("HH_SALARY_HARD_MIN must be an integer")
+        _env_hard_int = 200_000
+    _env_soft = values.get("HH_SALARY_SOFT_MIN", "250000")
+    try:
+        _env_soft_int = int(_env_soft)
+    except (TypeError, ValueError):
+        errors.append("HH_SALARY_SOFT_MIN must be an integer")
+        _env_soft_int = 250_000
+
+    salary_hard_min_value = _int_or(
+        hh_data.get("salary_hard_min"), _env_hard_int, "hh.salary_hard_min"
+    )
+    salary_soft_min_value = _int_or(
+        hh_data.get("salary_soft_min"), _env_soft_int, "hh.salary_soft_min"
+    )
+    if salary_soft_min_value and salary_hard_min_value > salary_soft_min_value:
+        errors.append(
+            "hh.salary_hard_min must not exceed hh.salary_soft_min"
+        )
+
+    # Junior title markers: list of substrings; empty list disables the filter.
+    raw_markers = hh_data.get("junior_title_markers")
+    if raw_markers is None:
+        junior_title_markers_value = HHProfile.__dataclass_fields__[
+            "junior_title_markers"
+        ].default
+    elif not isinstance(raw_markers, list):
+        errors.append("hh.junior_title_markers must be a list of strings")
+        junior_title_markers_value = HHProfile.__dataclass_fields__[
+            "junior_title_markers"
+        ].default
+    else:
+        cleaned = []
+        for m in raw_markers:
+            if not isinstance(m, str):
+                errors.append(
+                    "hh.junior_title_markers must contain only strings"
+                )
+                continue
+            s = m.strip().lower()
+            if s:
+                cleaned.append(s)
+        junior_title_markers_value = tuple(cleaned)
+
     try:
         candidate = CandidateProfile(
             name=_text(candidate_data, "name"),
@@ -425,6 +497,9 @@ def load_settings(
             areas=_strings(hh_data, "areas"),
             experience_filters=_strings(hh_data, "experience_filters"),
             remote_only=remote_only_value,
+            salary_hard_min=salary_hard_min_value,
+            salary_soft_min=salary_soft_min_value,
+            junior_title_markers=junior_title_markers_value,
         )
         max_length_value = cover_data.get("max_length", 1800)
         if isinstance(max_length_value, bool) or not isinstance(max_length_value, int) or max_length_value <= 0:
@@ -546,8 +621,6 @@ def load_settings(
         resumes_config_path=_path(
             values.get("RESUMES_CONFIG_PATH", "config/resumes.yaml")
         ),
-        hh_salary_hard_min=positive_integer("HH_SALARY_HARD_MIN", "200000"),
-        hh_salary_soft_min=positive_integer("HH_SALARY_SOFT_MIN", "250000"),
     )
     if errors:
         raise ConfigError("Configuration error:\n- " + "\n- ".join(dict.fromkeys(errors)))

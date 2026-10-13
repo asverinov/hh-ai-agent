@@ -289,14 +289,14 @@ async def process_vacancy(
     _peek = summary.salary_to if summary.salary_to is not None else summary.salary_from
     if (
         _peek is not None
-        and _peek < settings.hh_salary_soft_min
-        and _peek >= settings.hh_salary_hard_min
+        and _peek < settings.profile.hh.salary_soft_min
+        and _peek >= settings.profile.hh.salary_hard_min
     ):
         try:
             await telegram.notify_low_salary(
                 summary.title, summary.url,
                 summary.salary_from, summary.salary_to, summary.salary_currency,
-                settings.hh_salary_soft_min,
+                settings.profile.hh.salary_soft_min,
             )
         except Exception as exc:
             logger.warning("notify_low_salary_failed job_id=%s error=%s", summary.id, exc)
@@ -311,7 +311,7 @@ async def process_vacancy(
         )
         logger.info(
             "vacancy_skipped_low_salary job_id=%s peek=%s soft_min=%s",
-            summary.id, _peek, settings.hh_salary_soft_min,
+            summary.id, _peek, settings.profile.hh.salary_soft_min,
         )
         return VacancyProcessResult(
             "skipped_low_salary",
