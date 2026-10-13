@@ -96,7 +96,12 @@ class ManagedLLMProvider:
                 )
                 _txt = (response.text or "").lower()
                 if response.finish_reason == "blacklist" or any(m in _txt for m in _blacklist_markers):
-                    logger.warning("llm_blacklist_skip provider=%s operation=%s", self.adapter.name, request.operation)
+                    _matched = next((m for m in _blacklist_markers if m in _txt), "")
+                    logger.warning(
+                        "llm_blacklist_skip provider=%s operation=%s finish_reason=%r matched_marker=%r raw_head=%r raw_tail=%r",
+                        self.adapter.name, request.operation, response.finish_reason,
+                        _matched, (response.text or "")[:200], (response.text or "")[-200:],
+                    )
                     raise LLMBlacklistError()
                 if not response.text.strip() or response.finish_reason == "length":
                     raise LLMInvalidResponseError()
