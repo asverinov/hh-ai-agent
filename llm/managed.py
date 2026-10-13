@@ -21,8 +21,6 @@ from llm.errors import (
 )
 from llm.types import LLMRequest, LLMResponse
 
-_LLM_RATE_LIMIT = {"last": 0.0}
-
 
 logger = logging.getLogger(__name__)
 StructuredResult = TypeVar("StructuredResult", bound=BaseModel)
@@ -83,17 +81,11 @@ class ManagedLLMProvider:
             if row_id is None:
                 raise LLMDailyLimitError()
             try:
-                import time as _t, asyncio as _a
-                _elapsed = _t.monotonic() - _LLM_RATE_LIMIT["last"]
-                if _elapsed < 5.0:
-                    await _a.sleep(5.0 - _elapsed)
-                _LLM_RATE_LIMIT["last"] = _t.monotonic()
                 response = await self.adapter.complete(active_request)
-                logger.warning(
-                    "RAW_ANALYSIS: finish_reason=%r text_len=%s text=%r",
+                logger.debug(
+                    "llm_response_meta finish_reason=%r text_len=%s",
                     response.finish_reason,
                     len(response.text or ""),
-                    (response.text or "")[:2000],
                 )
                 _blacklist_markers = (
                     "разговоры на некоторые темы временно ограничены",
