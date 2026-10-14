@@ -87,20 +87,13 @@ class ManagedLLMProvider:
                     response.finish_reason,
                     len(response.text or ""),
                 )
-                _blacklist_markers = (
-                    "разговоры на некоторые темы временно ограничены",
-                    "ответы на вопросы, связанные с чувствительными темами",
-                    "собственным мнением",
-                    "чувствительные темы могут быть ограничены",
-                    "не обладает собственным мнением",
-                )
-                _txt = (response.text or "").lower()
-                if response.finish_reason == "blacklist" or any(m in _txt for m in _blacklist_markers):
-                    _matched = next((m for m in _blacklist_markers if m in _txt), "")
+                # Blacklist = только явный сигнал от API (finish_reason).
+                # Текстовые boilerplate-отказы GigaChat приходят с finish_reason=end_turn
+                # и должны уходить в retryable invalid_response, чтобы был шанс на retry.
+                if response.finish_reason == "blacklist":
                     logger.warning(
-                        "llm_blacklist_skip provider=%s operation=%s finish_reason=%r matched_marker=%r raw_head=%r raw_tail=%r",
-                        self.adapter.name, request.operation, response.finish_reason,
-                        _matched, (response.text or "")[:200], (response.text or "")[-200:],
+                        "llm_blacklist_skip provider=%s operation=%s finish_reason=blacklist raw_head=%r",
+                        self.adapter.name, request.operation, (response.text or "")[:200],
                     )
                     raise LLMBlacklistError()
                 if not response.text.strip() or response.finish_reason == "length":
