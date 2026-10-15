@@ -277,9 +277,14 @@ def test_blank_text_is_invalid_and_gets_one_correction(tmp_path: Path) -> None:
     assert database.llm_usage_stats()["successful_requests"] == 1
 
 
-def test_logs_and_database_contain_metadata_but_not_content_or_secrets(
+def test_logs_and_database_contain_metadata_but_not_prompt_or_user_content(
     tmp_path: Path, caplog: pytest.LogCaptureFixture
 ) -> None:
+    """Политика AI5 (Observability):
+    - raw_response LLM ПИШЕТСЯ в БД (для разбора ошибок и качества оценки);
+    - промпт (system_instructions) и user_content в БД НЕ пишутся;
+    - логи не содержат ни контента, ни секретов.
+    """
     provider, _, database = managed(tmp_path, [response("secret-response-sentinel")])
 
     with caplog.at_level("INFO"):
@@ -290,18 +295,30 @@ def test_logs_and_database_contain_metadata_but_not_content_or_secrets(
         stored = repr(connection.execute("SELECT * FROM llm_requests").fetchall())
     logs = caplog.text
 
+    # Метаданные сохраняются
     assert "request-metadata-1" in stored
     assert "provider=fake" in logs
     assert "model=test-model" in logs
     assert "latency_ms=12" in logs
     assert "input_tokens=3" in logs
     assert "output_tokens=4" in logs
+
+    # raw_response ПИШЕТСЯ в БД (новая политика)
+    assert "secret-response-sentinel" in stored
+
+    # Промпт и user_content в БД НЕ пишутся
+    for secret in (
+        "secret-prompt-sentinel",
+        "secret-user-content-sentinel",
+    ):
+        assert secret not in stored
+
+    # Логи чисты — ни контента, ни ответа, ни секретов
     for secret in (
         "secret-prompt-sentinel",
         "secret-user-content-sentinel",
         "secret-response-sentinel",
     ):
-        assert secret not in stored
         assert secret not in logs
 
 

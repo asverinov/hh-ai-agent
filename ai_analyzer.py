@@ -316,6 +316,7 @@ class VacancyAnalyzer:
         payload: dict[str, object],
         operation: str,
         structured: bool,
+        vacancy_id: str | None = None,
     ) -> LLMRequest:
         llm = self.settings.llm
         return LLMRequest(
@@ -327,10 +328,12 @@ class VacancyAnalyzer:
             timeout_seconds=llm.timeout_seconds,
             operation=operation,
             json_schema=SuitabilityResult.model_json_schema() if structured else None,
+            vacancy_id=vacancy_id,
         )
 
     async def assess(
-        self, vacancy_title: str, vacancy_description: str
+        self, vacancy_title: str, vacancy_description: str,
+        *, vacancy_id: str | None = None,
     ) -> SuitabilityResult:
         request = self._request(
             system_instructions=(
@@ -509,6 +512,7 @@ class VacancyAnalyzer:
             },
             operation="vacancy_analysis",
             structured=True,
+            vacancy_id=vacancy_id,
         )
         try:
             _, result = await self.provider.generate_structured(
@@ -525,7 +529,8 @@ class VacancyAnalyzer:
             raise AnalysisError(exc.category) from exc
 
     async def generate_cover_letter(
-        self, vacancy_title: str, vacancy_description: str, company_name: str = ""
+        self, vacancy_title: str, vacancy_description: str, company_name: str = "",
+        *, vacancy_id: str | None = None,
     ) -> str:
         cover = self.settings.profile.cover_letter
         greeting = "Добрый день!"
@@ -560,6 +565,7 @@ class VacancyAnalyzer:
             },
             operation="cover_letter",
             structured=False,
+            vacancy_id=vacancy_id,
         )
 
         for attempt in range(2):

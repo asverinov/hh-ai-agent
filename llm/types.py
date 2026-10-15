@@ -13,6 +13,7 @@ class LLMRequest:
     timeout_seconds: int
     operation: str
     json_schema: dict[str, object] | None = None
+    vacancy_id: str | None = None
 
 
 @dataclass(frozen=True)
