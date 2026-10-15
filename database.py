@@ -305,11 +305,25 @@ class Database:
                 "salary_to": "INTEGER",
                 "salary_currency": "TEXT NOT NULL DEFAULT ''",
                 "evaluation_json": "TEXT NOT NULL DEFAULT ''",
+                "description": "TEXT NOT NULL DEFAULT ''",
             }
             for name, definition in migrations.items():
                 if name not in columns:
                     connection.execute(
                         f"ALTER TABLE vacancies ADD COLUMN {name} {definition}"
+                    )
+            llm_columns = {
+                row[1] for row in connection.execute("PRAGMA table_info(llm_requests)")
+            }
+            llm_migrations = {
+                "vacancy_id": "TEXT",
+                "raw_response": "TEXT",
+                "prompt_version": "TEXT NOT NULL DEFAULT ''",
+            }
+            for name, definition in llm_migrations.items():
+                if name not in llm_columns:
+                    connection.execute(
+                        f"ALTER TABLE llm_requests ADD COLUMN {name} {definition}"
                     )
             self._migrate_status_check(connection)
             connection.execute(
@@ -477,14 +491,16 @@ class Database:
         salary_from: int | None = None,
         salary_to: int | None = None,
         salary_currency: str = "",
+        description: str = "",
     ) -> bool:
         with self._connect() as connection:
             cursor = connection.execute(
                 """
                 INSERT OR IGNORE INTO vacancies (
                     id, title, company, company_url, url, description_hash, search_query,
-                    status, discovered_at, salary_from, salary_to, salary_currency
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    status, discovered_at, salary_from, salary_to, salary_currency,
+                    description
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     job_id,
@@ -499,6 +515,7 @@ class Database:
                     salary_from,
                     salary_to,
                     salary_currency,
+                    description,
                 ),
             )
             return cursor.rowcount == 1
@@ -1005,6 +1022,8 @@ class Database:
         operation: str,
         now: datetime,
         daily_limit: int,
+        vacancy_id: str | None = None,
+        prompt_version: str = "",
     ) -> int | None:
         start, end = self._day_bounds(now)
         with self._connect() as connection:
@@ -1017,10 +1036,13 @@ class Database:
                 return None
             cursor = connection.execute(
                 """
-                INSERT INTO llm_requests (provider, model, operation, started_at)
-                VALUES (?, ?, ?, ?)
+                INSERT INTO llm_requests (
+                    provider, model, operation, started_at,
+                    vacancy_id, prompt_version
+                )
+                VALUES (?, ?, ?, ?, ?, ?)
                 """,
-                (provider, model, operation, _iso(now)),
+                (provider, model, operation, _iso(now), vacancy_id, prompt_version),
             )
             return int(cursor.lastrowid)
 
@@ -1035,6 +1057,7 @@ class Database:
         latency_ms: int | None = None,
         provider_request_id: str | None = None,
         error_type: str = "",
+        raw_response: str | None = None,
     ) -> bool:
         with self._connect() as connection:
             cursor = connection.execute(
@@ -1042,7 +1065,7 @@ class Database:
                 UPDATE llm_requests SET
                     finished_at = ?, success = ?, input_tokens = ?,
                     output_tokens = ?, latency_ms = ?, provider_request_id = ?,
-                    error_type = ?
+                    error_type = ?, raw_response = ?
                 WHERE id = ? AND success IS NULL
                 """,
                 (
@@ -1053,6 +1076,7 @@ class Database:
                     latency_ms,
                     provider_request_id,
                     error_type,
+                    raw_response,
                     request_row_id,
                 ),
             )

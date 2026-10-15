@@ -247,6 +247,7 @@ async def process_vacancy(
             salary_from=getattr(summary, "salary_from", None),
             salary_to=getattr(summary, "salary_to", None),
             salary_currency=getattr(summary, "salary_currency", "") or "",
+            description=details.description,
         ):
             return VacancyProcessResult("ignored")
         logger.info("vacancy_discovered job_id=%s", summary.id)
@@ -320,7 +321,9 @@ async def process_vacancy(
         )
 
     try:
-        suitability = await analyzer.assess(summary.title, details.description)
+        suitability = await analyzer.assess(
+            summary.title, details.description, vacancy_id=summary.id
+        )
     except AnalysisError as exc:
         database.mark_analysis_failed(
             summary.id,
@@ -401,7 +404,8 @@ async def process_vacancy(
     )
 
     letter = await analyzer.generate_cover_letter(
-        summary.title, details.description, company_name=details.company
+        summary.title, details.description, company_name=details.company,
+        vacancy_id=summary.id,
     )
     if not letter.strip():
         database.transition(

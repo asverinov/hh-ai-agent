@@ -111,6 +111,9 @@ def test_completion_records_only_usage_metadata(tmp_path: Path) -> None:
         "latency_ms": 123,
         "provider_request_id": "provider-request-1",
         "error_type": "",
+        "vacancy_id": None,
+        "prompt_version": "",
+        "raw_response": None,
     }
 
 

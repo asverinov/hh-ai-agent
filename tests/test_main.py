@@ -89,7 +89,9 @@ class FakeAnalyzer:
     def __init__(self):
         self.assess_calls = 0
 
-    async def assess(self, title: str, description: str) -> SuitabilityResult:
+    async def assess(
+        self, title: str, description: str, *, vacancy_id: str | None = None
+    ) -> SuitabilityResult:
         self.assess_calls += 1
         return SuitabilityResult(
             suitable=True,
@@ -99,7 +101,8 @@ class FakeAnalyzer:
         )
 
     async def generate_cover_letter(
-        self, title: str, description: str, company_name: str = ""
+        self, title: str, description: str, company_name: str = "",
+        *, vacancy_id: str | None = None,
     ) -> str:
         return "Safe local-profile letter"
 
@@ -108,7 +111,9 @@ class SequenceAnalyzer(FakeAnalyzer):
     def __init__(self, outcomes: list[SuitabilityResult | Exception]):
         self.outcomes = iter(outcomes)
 
-    async def assess(self, title: str, description: str) -> SuitabilityResult:
+    async def assess(
+        self, title: str, description: str, *, vacancy_id: str | None = None
+    ) -> SuitabilityResult:
         outcome = next(self.outcomes)
         if isinstance(outcome, Exception):
             raise outcome
@@ -121,7 +126,9 @@ class PausingAnalyzer(FakeAnalyzer):
         self.control = control
         self.calls = 0
 
-    async def assess(self, title: str, description: str) -> SuitabilityResult:
+    async def assess(
+        self, title: str, description: str, *, vacancy_id: str | None = None
+    ) -> SuitabilityResult:
         self.calls += 1
         self.control.paused = True
         return await super().assess(title, description)
@@ -273,7 +280,9 @@ def test_dry_run_records_and_previews_without_pending_actions(tmp_path: Path) ->
         SUMMARY, PageState.VACANCY_LOADED, "Example", "Build Python services"
     )
     class CompanyCheckingAnalyzer(FakeAnalyzer):
-        async def generate_cover_letter(self, title, description, company_name=""):
+        async def generate_cover_letter(
+            self, title, description, company_name="", *, vacancy_id=None
+        ):
             assert company_name == "Example"
             return await super().generate_cover_letter(title, description, company_name)
 
