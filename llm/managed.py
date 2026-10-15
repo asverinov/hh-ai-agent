@@ -71,8 +71,13 @@ class ManagedLLMProvider:
     ) -> tuple[LLMResponse, StructuredResult | None]:
         invalid_responses = 0
         active_request = request
+        # prompt_version = хеш только от system_instructions.
+        # Семантика: все вызовы с одним промптом имеют одинаковый pv,
+        # меняется промпт → меняется pv. user_content (конкретная вакансия)
+        # в хеш НЕ входит — иначе pv был бы уникален для каждой вакансии
+        # и не годился бы для группировки.
         prompt_version = hashlib.sha256(
-            (request.system_instructions + "\n" + request.user_content).encode("utf-8")
+            request.system_instructions.encode("utf-8")
         ).hexdigest()[:12]
         for attempt in range(self.max_retries + 1):
             row_id = self.database.reserve_llm_request(
