@@ -130,6 +130,7 @@ class Settings:
     max_applications_per_day: int
     max_vacancies_per_query: int
     max_pages_per_query: int
+    max_pending_recommendations: int
     min_seconds_between_actions: int
     approval_ttl_minutes: int
     auto_apply: AutoApplySettings
@@ -589,6 +590,7 @@ def load_settings(
         max_applications_per_day=positive_integer("MAX_APPLICATIONS_PER_DAY", "5"),
         max_vacancies_per_query=positive_integer("MAX_VACANCIES_PER_QUERY", "20"),
         max_pages_per_query=positive_integer("MAX_PAGES_PER_QUERY", "2"),
+        max_pending_recommendations=positive_integer("MAX_PENDING_RECOMMENDATIONS", "30"),
         min_seconds_between_actions=positive_integer("MIN_SECONDS_BETWEEN_ACTIONS", "5"),
         approval_ttl_minutes=positive_integer("APPROVAL_TTL_MINUTES", "30"),
         auto_apply=AutoApplySettings(
