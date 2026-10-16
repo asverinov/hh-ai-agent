@@ -624,7 +624,7 @@ class Database:
             target not in ALLOWED_TRANSITIONS.get(status, set()) for status in expected_statuses
         ):
             return False
-        allowed_fields = {"llm_decision", "llm_reason", "confidence", "cover_letter", "error_text"}
+        allowed_fields = {"llm_decision", "llm_reason", "confidence", "cover_letter", "error_text", "evaluation_json"}
         if unknown := set(fields) - allowed_fields:
             raise ValueError(f"Unsupported transition fields: {', '.join(sorted(unknown))}")
         assignments = ["status = ?", *(f"{name} = ?" for name in fields)]
@@ -646,6 +646,7 @@ class Database:
         llm_reason: str,
         confidence: float,
         fit_summary: str = "",
+        evaluation_json: str = "",
         now: datetime,
     ) -> bool:
         with self._connect() as connection:
@@ -654,7 +655,8 @@ class Database:
                 UPDATE vacancies SET
                     status = ?, cover_letter = ?, llm_decision = ?,
                     llm_reason = ?, fit_summary = ?, confidence = ?, approval_requested_at = ?,
-                    approval_expires_at = NULL, error_text = ''
+                    approval_expires_at = NULL, error_text = '',
+                    evaluation_json = ?
                 WHERE id = ? AND status = ?
                 """,
                 (
@@ -665,6 +667,7 @@ class Database:
                     fit_summary,
                     confidence,
                     _iso(now),
+                    evaluation_json,
                     job_id,
                     VacancyStatus.DISCOVERED.value,
                 ),

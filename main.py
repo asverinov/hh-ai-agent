@@ -340,6 +340,22 @@ async def process_vacancy(
             PageState.VACANCY_LOADED,
         )
 
+    evaluation_data = {
+        "verdict": suitability.verdict,
+        "requirements": [
+            {
+                "level": r.level,
+                "label": r.label,
+                "text": r.text,
+                "match": r.match,
+                "evidence": r.evidence,
+            }
+            for r in suitability.requirements
+        ],
+        "confidence": suitability.confidence,
+    }
+    evaluation_json = json.dumps(evaluation_data, ensure_ascii=False)
+
     if not suitability.suitable:
         pesec_on_reject(summary.title, reason=f"LLM: {suitability.verdict}")
         database.transition(
@@ -349,6 +365,7 @@ async def process_vacancy(
             llm_decision=False,
             llm_reason=suitability.verdict,
             confidence=suitability.confidence,
+            evaluation_json=evaluation_json,
             error_text="",
         )
         logger.info("vacancy_rejected job_id=%s source=llm", summary.id)
@@ -384,20 +401,6 @@ async def process_vacancy(
     if not parts:
         parts.append(f"Оценка: {suitability.verdict[:200]}")
     fit_summary = "\n".join(parts)
-    evaluation_data = {
-        "requirements": [
-            {
-                "level": r.level,
-                "label": r.label,
-                "text": r.text,
-                "match": r.match,
-                "evidence": r.evidence,
-            }
-            for r in suitability.requirements
-        ],
-        "confidence": suitability.confidence,
-    }
-    evaluation_json = json.dumps(evaluation_data, ensure_ascii=False)
     company = await hh_client.read_company_details(details.company_url)
     database.store_company_details(
         summary.id, rating=company.rating, reviews_count=company.reviews_count
@@ -437,6 +440,7 @@ async def process_vacancy(
         llm_reason=suitability.verdict,
         confidence=suitability.confidence,
         fit_summary=fit_summary,
+        evaluation_json=evaluation_json,
         now=now,
     ):
         return VacancyProcessResult(
