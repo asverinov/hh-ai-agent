@@ -1,0 +1,28 @@
+{
+  "created_at": "2026-10-17T00:20:00+03:00",
+  "purpose": "Калибровочный набор для сравнения LLM-моделей на оценке вакансий (P4)",
+  "positive": [
+    {"id": "137683582", "conf": 0.805, "type": "Product R&D",     "note": "граница, тип R&D"},
+    {"id": "138558358", "conf": 0.795, "type": "ГИП",              "note": "граница, госзаказ"},
+    {"id": "138357711", "conf": 0.872, "type": "Head of Dept",    "note": "FP из P4 (Rostic's)"},
+    {"id": "138385238", "conf": 0.896, "type": "Chief of Staff",  "note": "нетипичная роль"},
+    {"id": "137353733", "conf": 0.907, "type": "ИБ-проекты",       "note": "узкая специализация"},
+    {"id": "138072797", "conf": 0.909, "type": "HR tech",         "note": "отрасль вне ядра"},
+    {"id": "138204825", "conf": 0.909, "type": "Фин-мониторинг",  "note": "домен"},
+    {"id": "138550519", "conf": 0.931, "type": "FinTech SaaS",    "note": "домен FinTech"},
+    {"id": "137767768", "conf": 0.947, "type": "Senior PM",       "note": "топ, но не 0.99"},
+    {"id": "137134582", "conf": 0.906, "type": "Middle+ Senior PM","note": "средний PM"}
+  ],
+  "negative": [
+    {"id": "138566748", "conf": 0.683, "type": "Project manager",  "note": "граница"},
+    {"id": "138025868", "conf": 0.600, "type": "Delivery manager", "note": "роль ≠ функция"},
+    {"id": "137526115", "conf": 0.537, "type": "PM B2B SaaS",     "note": "домен"},
+    {"id": "138564721", "conf": 0.533, "type": "Рук. проектов",    "note": ""},
+    {"id": "138528225", "conf": 0.468, "type": "Non-IT",          "note": "FN из P4 (RUTUBE)"},
+    {"id": "138545949", "conf": 0.463, "type": "Account Mgmt",    "note": ""},
+    {"id": "137969918", "conf": 0.452, "type": "Customer Care",   "note": "функция"},
+    {"id": "138554274", "conf": 0.450, "type": "Партнёры Финтех",  "note": "роль ≠ функция"},
+    {"id": "138523348", "conf": 0.440, "type": "Project Manager",  "note": ""},
+    {"id": "136204304", "conf": 0.438, "type": "Премиум клиенты",  "note": "домен"}
+  ]
+}
