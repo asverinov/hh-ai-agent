@@ -58,5 +58,3 @@ docs/datasets/*.txt
 docs/datasets/report_*.md
 docs/datasets/compare.py
 docs/datasets/export_raw.py
-docs/datasets/compare.py
-docs/datasets/export_raw.py
