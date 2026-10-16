@@ -131,6 +131,8 @@ class Settings:
     max_vacancies_per_query: int
     max_pages_per_query: int
     max_pending_recommendations: int
+    tg_report_per_page: bool
+    enable_cover_letter_generation: bool
     min_seconds_between_actions: int
     approval_ttl_minutes: int
     auto_apply: AutoApplySettings
@@ -172,6 +174,12 @@ def _text(section: Mapping[str, object], key: str, default: str = "") -> str:
     if not isinstance(value, str):
         raise TypeError(f"{key} must be a string")
     return value.strip()
+
+
+def _bool_value(raw: str | None, default: bool = False) -> bool:
+    if raw is None:
+        return default
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
 
 
 def load_settings(
@@ -589,8 +597,12 @@ def load_settings(
         check_interval_minutes=positive_integer("CHECK_INTERVAL_MINUTES", "30"),
         max_applications_per_day=positive_integer("MAX_APPLICATIONS_PER_DAY", "5"),
         max_vacancies_per_query=positive_integer("MAX_VACANCIES_PER_QUERY", "20"),
-        max_pages_per_query=positive_integer("MAX_PAGES_PER_QUERY", "2"),
+        max_pages_per_query=non_negative_integer("MAX_PAGES_PER_QUERY", "2"),
         max_pending_recommendations=positive_integer("MAX_PENDING_RECOMMENDATIONS", "30"),
+        tg_report_per_page=_bool_value(values.get("TG_REPORT_PER_PAGE", "false")),
+        enable_cover_letter_generation=_bool_value(
+            values.get("ENABLE_COVER_LETTER_GENERATION", "true")
+        ),
         min_seconds_between_actions=positive_integer("MIN_SECONDS_BETWEEN_ACTIONS", "5"),
         approval_ttl_minutes=positive_integer("APPROVAL_TTL_MINUTES", "30"),
         auto_apply=AutoApplySettings(

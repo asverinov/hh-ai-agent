@@ -356,9 +356,19 @@ class HHClient:
                 raise RuntimeError(
                     f"similar_vacancies HTTP {resp.status}: {payload}"
                 )
+            items = payload.get("items") or []
+            logger.info(
+                "similar_vacancies_payload page=%s per_page=%s items=%s found=%s pages=%s",
+                page, per_page, len(items),
+                payload.get("found"),
+                payload.get("pages"),
+            )
             return payload
 
-    async def search_vacancies_by_resume(self) -> VacancySearchResult:
+    async def search_vacancies_by_resume(
+        self,
+        page_callback: "Callable[[dict[str, Any]], Awaitable[None]] | None" = None,
+    ) -> VacancySearchResult:
         resume = self._read_active_resume()
         if resume is None:
             return VacancySearchResult([], 0, 0, "no_active_resume")
@@ -377,17 +387,37 @@ class HHClient:
         results: list[VacancySummary] = []
         found_results = 0
         duplicates = 0
+        new_count = 0
         seen_ids: set[str] = set()
+        batch_seen_ids: list[str] = []
+
+        total_pages = 0
+        max_pages = self.settings.max_pages_per_query
+        HARD_CAP = 200
 
         try:
-            for page_number in range(self.settings.max_pages_per_query):
+            for page_number in range(HARD_CAP):
+                if max_pages > 0 and page_number >= max_pages:
+                    logger.info(
+                        "search_by_resume_max_pages_hit max_pages=%s page=%s",
+                        max_pages, page_number,
+                    )
+                    break
+                if total_pages > 0 and page_number >= total_pages:
+                    break
+
                 await self._delay()
                 payload = await self._fetch_similar_page(
                     resume_id, page_number, per_page=100
                 )
+                if total_pages == 0:
+                    total_pages = int(payload.get("pages") or 0)
                 items = payload.get("items") or []
                 if not items:
                     break
+
+                new_on_page = 0
+                dup_on_page = 0
                 for item in items:
                     job_id = str(item.get("id") or "").strip()
                     title = str(item.get("name") or "").strip()
@@ -418,41 +448,60 @@ class HHClient:
                         )
                         continue
                     found_results += 1
+                    batch_seen_ids.append(job_id)
                     if job_id in seen_ids:
                         duplicates += 1
+                        dup_on_page += 1
                         continue
                     seen_ids.add(job_id)
+                    if self.database.is_seen(job_id):
+                        duplicates += 1
+                        dup_on_page += 1
+                        continue
                     existing = self.database.get(job_id)
                     if existing is not None:
                         duplicates += 1
-                        if (
-                            existing.status is VacancyStatus.PENDING_APPROVAL
-                            and len(results) < self.settings.max_vacancies_per_query
-                        ):
-                            results.append(
-                                VacancySummary(
-                                    job_id, title, url, query_label, True
-                                )
-                            )
+                        dup_on_page += 1
                         continue
-                    if len(results) < self.settings.max_vacancies_per_query:
-                        results.append(
-                            VacancySummary(
-                                job_id, title, url, query_label,
-                                salary_from=s_from,
-                                salary_to=s_to,
-                                salary_currency=s_cur,
-                            )
+                    if new_count >= self.settings.max_vacancies_per_query:
+                        new_on_page += 1
+                        continue
+                    results.append(
+                        VacancySummary(
+                            job_id, title, url, query_label,
+                            salary_from=s_from,
+                            salary_to=s_to,
+                            salary_currency=s_cur,
                         )
-                if len(results) >= self.settings.max_vacancies_per_query:
-                    break
+                    )
+                    new_count += 1
+                    new_on_page += 1
 
+                if page_callback is not None:
+                    try:
+                        await page_callback({
+                            "page": page_number,
+                            "total_pages": total_pages,
+                            "items": len(items),
+                            "new": new_on_page,
+                            "duplicates": dup_on_page,
+                            "results_total": len(results),
+                            "found_total": found_results,
+                        })
+                    except Exception as cb_exc:
+                        logger.warning(
+                            "search_by_resume_page_callback_failed error=%s", cb_exc,
+                        )
+
+            # Записать все ID как просмотренные (архив)
+            marked = self.database.mark_seen(batch_seen_ids)
             logger.info(
-                "search_by_resume_finished resume=%s found=%s new=%s duplicates=%s",
+                "search_by_resume_finished resume=%s found=%s new=%s duplicates=%s seen_marked=%s",
                 resume_code,
                 found_results,
                 len(results),
                 duplicates,
+                marked,
             )
             return VacancySearchResult(results, found_results, duplicates)
         except Exception as exc:

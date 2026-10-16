@@ -406,21 +406,25 @@ async def process_vacancy(
         summary.id, rating=company.rating, reviews_count=company.reviews_count
     )
 
-    letter = await analyzer.generate_cover_letter(
-        summary.title, details.description, company_name=details.company,
-        vacancy_id=summary.id,
-    )
-    if not letter.strip():
-        database.transition(
-            summary.id,
-            VacancyStatus.DISCOVERED,
-            VacancyStatus.APPLY_FAILED,
-            error_text="cover_letter_failed",
+    if settings.enable_cover_letter_generation:
+        letter = await analyzer.generate_cover_letter(
+            summary.title, details.description, company_name=details.company,
+            vacancy_id=summary.id,
         )
-        await telegram.notify_analysis_failed(summary.title, summary.url, "cover_letter_failed")
-        return VacancyProcessResult(
-            "other_error", "cover_letter_failed", PageState.VACANCY_LOADED
-        )
+        if not letter.strip():
+            database.transition(
+                summary.id,
+                VacancyStatus.DISCOVERED,
+                VacancyStatus.APPLY_FAILED,
+                error_text="cover_letter_failed",
+            )
+            await telegram.notify_analysis_failed(summary.title, summary.url, "cover_letter_failed")
+            return VacancyProcessResult(
+                "other_error", "cover_letter_failed", PageState.VACANCY_LOADED
+            )
+    else:
+        letter = ""
+        logger.info("cover_letter_generation_disabled job_id=%s", summary.id)
 
     include_actions = settings.app_mode != "dry_run"
     if settings.app_mode == "dry_run":
@@ -575,7 +579,26 @@ async def run_search_cycle(
             # Один вызов — не крутим цикл по всем search_queries впустую
             if not control.paused:
                 logger.info("search_by_resume_started resume=RP")
-                search = await hh_client.search_vacancies_by_resume()
+                async def _page_cb(info: dict) -> None:
+                    if not getattr(settings, "tg_report_per_page", False):
+                        return
+                    page = info["page"] + 1
+                    total = info.get("total_pages") or "?"
+                    try:
+                        await telegram.notify(
+                            f"📄 Стр. {page}/{total}\n"
+                            f"Из API: {info['items']}\n"
+                            f"Новых: {info['new']}\n"
+                            f"Дубликатов: {info['duplicates']}\n"
+                            f"В очередь на LLM: {info['new']} "
+                            f"(всего {info['results_total']})"
+                        )
+                    except Exception as exc:
+                        logger.warning("page_cb_notify_failed error=%s", exc)
+
+                search = await hh_client.search_vacancies_by_resume(
+                    page_callback=_page_cb
+                )
                 stats.query_count += 1
                 stats.found_results += search.found_results
                 stats.new_vacancies += sum(

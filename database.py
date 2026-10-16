@@ -160,6 +160,49 @@ class Database:
             )
             connection.execute(
                 """
+                CREATE TABLE IF NOT EXISTS seen_vacancies (
+                    id TEXT PRIMARY KEY,
+                    seen_at TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS seen_vacancies_seen_at_idx "
+                "ON seen_vacancies(seen_at)"
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS evaluations (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    vacancy_id TEXT NOT NULL,
+                    llm_request_id INTEGER,
+                    provider TEXT NOT NULL,
+                    model TEXT NOT NULL,
+                    prompt_version TEXT NOT NULL DEFAULT '',
+                    suitable INTEGER CHECK (suitable IN (0, 1)),
+                    confidence REAL,
+                    verdict TEXT NOT NULL DEFAULT '',
+                    requirements_json TEXT NOT NULL DEFAULT '',
+                    is_calibration INTEGER NOT NULL DEFAULT 0,
+                    created_at TEXT NOT NULL,
+                    UNIQUE(vacancy_id, model, prompt_version)
+                )
+                """
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS evaluations_vacancy_idx "
+                "ON evaluations(vacancy_id)"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS evaluations_model_idx "
+                "ON evaluations(model)"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS evaluations_calibration_idx "
+                "ON evaluations(is_calibration)"
+            )
+            connection.execute(
+                """
                 CREATE TABLE IF NOT EXISTS chat_messages (
                     msg_id TEXT PRIMARY KEY,
                     chat_id TEXT,
@@ -519,6 +562,131 @@ class Database:
                 ),
             )
             return cursor.rowcount == 1
+
+    def mark_seen(self, job_ids: list[str]) -> int:
+        """Записать ID вакансий как просмотренные (без чтения описания).
+
+        Используется в search_vacancies_by_resume: все ID из выдачи API
+        записываются в seen_vacancies, даже если их отфильтровали.
+        Иначе вакансии с page=0 будут приходить каждый цикл и не дадут
+        дойти до page=1+.
+        """
+        if not job_ids:
+            return 0
+        from datetime import datetime, UTC
+        now_iso = _iso(datetime.now(UTC))
+        inserted = 0
+        with self._connect() as connection:
+            for jid in job_ids:
+                cursor = connection.execute(
+                    "INSERT OR IGNORE INTO seen_vacancies (id, seen_at) VALUES (?, ?)",
+                    (jid, now_iso),
+                )
+                inserted += cursor.rowcount
+        return inserted
+
+    def is_seen(self, job_id: str) -> bool:
+        """Проверить, видели ли этот ID в прошлых циклах."""
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT 1 FROM seen_vacancies WHERE id = ? LIMIT 1", (job_id,)
+            ).fetchone()
+            return row is not None
+
+    def record_evaluation(
+        self,
+        *,
+        vacancy_id: str,
+        llm_request_id: int | None,
+        provider: str,
+        model: str,
+        prompt_version: str,
+        suitable: bool,
+        confidence: float | None,
+        verdict: str,
+        requirements_json: str,
+        is_calibration: int = 0,
+        created_at: datetime | None = None,
+    ) -> bool:
+        """Записать оценку вакансии от конкретной модели.
+
+        UNIQUE(vacancy_id, model, prompt_version) — повторный прогон той же
+        модели на той же версии промпта перезаписывает предыдущий результат.
+        """
+        now = created_at or datetime.now(UTC)
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                INSERT OR REPLACE INTO evaluations (
+                    vacancy_id, llm_request_id, provider, model, prompt_version,
+                    suitable, confidence, verdict, requirements_json,
+                    is_calibration, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    vacancy_id,
+                    llm_request_id,
+                    provider,
+                    model,
+                    prompt_version,
+                    int(suitable),
+                    confidence,
+                    verdict,
+                    requirements_json,
+                    is_calibration,
+                    _iso(now),
+                ),
+            )
+            return cursor.rowcount == 1
+
+    def list_evaluations(
+        self,
+        *,
+        vacancy_id: str | None = None,
+        model: str | None = None,
+        only_calibration: bool = False,
+    ) -> list[dict]:
+        """Список оценок. Фильтры: по вакансии, модели, калибровочному набору."""
+        query = "SELECT * FROM evaluations WHERE 1=1"
+        params: list = []
+        if vacancy_id:
+            query += " AND vacancy_id = ?"
+            params.append(vacancy_id)
+        if model:
+            query += " AND model = ?"
+            params.append(model)
+        if only_calibration:
+            query += " AND is_calibration = 1"
+        query += " ORDER BY created_at DESC"
+        with self._connect() as connection:
+            connection.row_factory = sqlite3.Row
+            rows = connection.execute(query, params).fetchall()
+        return [dict(r) for r in rows]
+
+    def mark_calibration(self, vacancy_ids: list[str], value: int = 1) -> int:
+        """Пометить вакансии как часть калибровочного набора.
+
+        Обновляет уже существующие записи в evaluations. Если их нет —
+        будет 0 обновлений (запись произойдёт при первом прогоне модели).
+        """
+        if not vacancy_ids:
+            return 0
+        placeholders = ", ".join("?" for _ in vacancy_ids)
+        with self._connect() as connection:
+            cursor = connection.execute(
+                f"UPDATE evaluations SET is_calibration = ? "
+                f"WHERE vacancy_id IN ({placeholders})",
+                [value, *vacancy_ids],
+            )
+            return cursor.rowcount
+
+    def calibration_set(self) -> set[str]:
+        """ID вакансий, помеченных как калибровочные."""
+        with self._connect() as connection:
+            rows = connection.execute(
+                "SELECT DISTINCT vacancy_id FROM evaluations WHERE is_calibration = 1"
+            ).fetchall()
+        return {r[0] for r in rows}
 
     def store_company_details(
         self, job_id: str, *, rating: float | None, reviews_count: int | None
