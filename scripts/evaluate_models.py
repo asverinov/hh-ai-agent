@@ -185,6 +185,24 @@ async def run(args: argparse.Namespace) -> int:
         print("\nDRY-RUN: ничего не вызвано, ничего не записано")
         return 0
 
+    # --- session_id (для кэша) ---
+    session_id = args.session_id
+    if not session_id:
+        from datetime import datetime
+        session_id = f"{args.provider}-calibration-{datetime.now():%Y%m%d-%H%M%S}"
+    print(f"INFO: session_id={session_id}")
+    print(f"INFO: cache {'включён' if args.provider == 'aitunnel' else 'не используется (GigaChat)'}")
+
+    # --- system_override (обогащённый промпт) ---
+    system_override: str | None = None
+    if args.system_from_file:
+        if not args.system_from_file.exists():
+            print(f"ERROR: {args.system_from_file} не найден", file=sys.stderr)
+            return 2
+        system_override = args.system_from_file.read_text(encoding="utf-8")
+        print(f"INFO: system_override из {args.system_from_file} "
+              f"({len(system_override)} символов)")
+
     # --- инициализация провайдера и анализатора ---
     if args.provider == "aitunnel":
         provider = create_aitunnel_provider(settings, db)
@@ -217,6 +235,8 @@ async def run(args: argparse.Namespace) -> int:
                         result = await analyzer.assess(
                             v["title"], v["description"],
                             vacancy_id=vid, model_override=model,
+                            session_id=session_id,
+                            system_override=system_override,
                         )
                         break
                     except AnalysisError as exc:
@@ -305,6 +325,10 @@ def main() -> int:
                    help="пауза между вызовами LLM в секундах (default: 3.0)")
     p.add_argument("--max-tokens", type=int, default=None,
                    help="override LLM_MAX_OUTPUT_TOKENS (для reasoning-моделей)")
+    p.add_argument("--session-id", default=None,
+                   help="session_id для кэша (DeepSeek/AITUNNEL). Default: auto из provider+timestamp")
+    p.add_argument("--system-from-file", type=Path, default=None,
+                   help="путь к файлу с system prompt (заменяет rules 1-24, для AITUNNEL)")
     p.add_argument("--dry-run", action="store_true",
                    help="только показать, что будет обработано")
     args = p.parse_args()

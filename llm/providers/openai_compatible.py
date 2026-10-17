@@ -57,6 +57,8 @@ class OpenAICompatibleProvider:
             "temperature": request.temperature,
             "max_tokens": request.max_output_tokens,
         }
+        if request.session_id:
+            payload["session_id"] = request.session_id
         if request.json_schema is not None and self.json_mode:
             payload["response_format"] = {"type": "json_object"}
         if self.reasoning_enabled is not None:

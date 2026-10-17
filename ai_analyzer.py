@@ -318,10 +318,13 @@ class VacancyAnalyzer:
         structured: bool,
         vacancy_id: str | None = None,
         model_override: str | None = None,
+        session_id: str | None = None,
+        system_override: str | None = None,
     ) -> LLMRequest:
         llm = self.settings.llm
+        final_system = system_override if system_override else system_instructions
         return LLMRequest(
-            system_instructions=system_instructions,
+            system_instructions=final_system,
             user_content=json.dumps(payload, ensure_ascii=False),
             model=model_override or llm.model,
             temperature=llm.temperature,
@@ -330,12 +333,15 @@ class VacancyAnalyzer:
             operation=operation,
             json_schema=SuitabilityResult.model_json_schema() if structured else None,
             vacancy_id=vacancy_id,
+            session_id=session_id,
         )
 
     async def assess(
         self, vacancy_title: str, vacancy_description: str,
         *, vacancy_id: str | None = None,
         model_override: str | None = None,
+        session_id: str | None = None,
+        system_override: str | None = None,
     ) -> SuitabilityResult:
         request = self._request(
             system_instructions=(
@@ -533,6 +539,8 @@ class VacancyAnalyzer:
             structured=True,
             vacancy_id=vacancy_id,
             model_override=model_override,
+            session_id=session_id,
+            system_override=system_override,
         )
         try:
             _, result = await self.provider.generate_structured(
