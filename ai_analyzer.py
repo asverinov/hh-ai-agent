@@ -162,13 +162,14 @@ class SuitabilityResult(BaseModel):
     requirements: list[Requirement] = Field(default_factory=list)
     verdict: str = Field(min_length=1, max_length=1500)
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    best_resume: str | None = Field(default=None, max_length=10)
 
     @model_validator(mode="before")
     @classmethod
     def _normalize(cls, data: object) -> object:
         if not isinstance(data, dict):
             return data
-        root_keys = {"suitable", "requirements", "verdict", "confidence"}
+        root_keys = {"suitable", "requirements", "verdict", "confidence", "best_resume"}
         req_keys = {"level", "label", "text", "match", "evidence"}
         data = dict(data)
         for k in list(data.keys()):
@@ -189,6 +190,22 @@ class SuitabilityResult(BaseModel):
                 if data.get("suitable") is True
                 else "Не подаваться. Причина: модель не вернула verdict."
             )
+        # best_resume: нормализуем к RP/RSP/RPO/ROP
+        br = data.get("best_resume")
+        if isinstance(br, str):
+            br_up = br.strip().upper()
+            valid = ("RSP", "RPO", "ROP", "RP")  # длинные первыми
+            if br_up in valid:
+                data["best_resume"] = br_up
+            else:
+                for code in valid:
+                    if code in br_up:
+                        data["best_resume"] = code
+                        break
+                else:
+                    data["best_resume"] = None
+        else:
+            data["best_resume"] = None
         return data
 
 

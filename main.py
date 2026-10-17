@@ -353,6 +353,7 @@ async def process_vacancy(
             for r in suitability.requirements
         ],
         "confidence": suitability.confidence,
+        "best_resume": suitability.best_resume,
     }
     evaluation_json = json.dumps(evaluation_data, ensure_ascii=False)
 
@@ -427,6 +428,8 @@ async def process_vacancy(
             parts.append(f"{label}: {score:.0%}")
     if not parts:
         parts.append(f"Оценка: {suitability.verdict[:200]}")
+    if suitability.best_resume:
+        parts.append(f"Резюме: {suitability.best_resume}")
     fit_summary = "\n".join(parts)
     company = await hh_client.read_company_details(details.company_url)
     database.store_company_details(

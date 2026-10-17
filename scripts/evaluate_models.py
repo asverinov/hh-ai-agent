@@ -278,6 +278,7 @@ async def run(args: argparse.Namespace) -> int:
                         for r in result.requirements
                     ],
                     "confidence": result.confidence,
+                    "best_resume": result.best_resume,
                 }
                 db.record_evaluation(
                     vacancy_id=vid,
