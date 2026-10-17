@@ -14,6 +14,7 @@ class LLMRequest:
     operation: str
     json_schema: dict[str, object] | None = None
     vacancy_id: str | None = None
+    session_id: str | None = None
 
 
 @dataclass(frozen=True)
