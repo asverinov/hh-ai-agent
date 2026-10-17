@@ -61,3 +61,6 @@ docs/datasets/export_raw.py
 docs/datasets/calibration_full_matrix.csv
 docs/datasets/calibration_blind_*.txt
 docs/datasets/calibration_reference_*.txt
+
+# Ручная разметка (ground truth) — в git, не артефакт
+!docs/datasets/manual_labels_*.txt
