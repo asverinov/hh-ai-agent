@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import aiohttp
 import logging
 import random
@@ -262,6 +263,21 @@ class HHClient:
         if self._http_session is not None and not self._http_session.closed:
             await self._http_session.close()
         self._http_session = None
+
+    def _get_resume_id(self, code: str) -> str | None:
+        """Возвращает ID резюме по его коду (RP, RSP, RPO, ROP)."""
+        path = self.settings.resumes_config_path
+        if not path.exists():
+            return None
+        try:
+            data = yaml.safe_load(path.read_text(encoding="utf-8"))
+            resumes = data.get("resumes") or {}
+            item = resumes.get(code)
+            if item and item.get("id"):
+                return str(item["id"]).strip()
+        except Exception as exc:
+            logger.warning("read_resume_id_failed code=%s error=%s", code, exc)
+        return None
 
     def _read_active_resume(self) -> dict[str, str] | None:
         path = self.settings.resumes_config_path
@@ -1121,16 +1137,61 @@ class HHClient:
                 logger.info("applied_jobs_recorded job_id=%s", permission.job_id)
                 return True
 
-            resume_name = self.settings.profile.hh.resume_name
-            resume_selector = page.locator(
-                '[data-qa*="resume-select"], [data-qa*="resume-selector"]'
-            ).first
-            if resume_name and await resume_selector.is_visible():
-                await resume_selector.click()
-                option = page.get_by_text(resume_name, exact=True).first
-                if not await option.is_visible():
-                    raise RuntimeError("configured resume was not found")
-                await option.click()
+            # --- A3: Выбор резюме по best_resume из evaluation_json ---
+            best_resume = None
+            if vacancy.evaluation_json:
+                try:
+                    eval_data = json.loads(vacancy.evaluation_json)
+                    best_resume = eval_data.get("best_resume")
+                except Exception:
+                    pass
+
+            resume_code = best_resume or "RP"
+            resume_id = self._get_resume_id(resume_code)
+            if not resume_id:
+                resume_id = self._get_resume_id("RP")
+
+            if resume_id:
+                try:
+                    # 1. Открываем список резюме кликом по resume-title
+                    resume_title_btn = page.locator('[data-qa="resume-title"]').first
+                    if await resume_title_btn.is_visible():
+                        await resume_title_btn.click()
+                        await self._delay()
+                        # 2. Ждём список опций
+                        await page.wait_for_selector(
+                            '[data-qa="magritte-select-option-list"]',
+                            state="visible", timeout=5_000,
+                        )
+                        # 3. Кликаем по нужному резюме по data-magritte-select-option
+                        target_label = page.locator(
+                            f'label[data-magritte-select-option="{resume_id}"]'
+                        ).first
+                        if await target_label.count() > 0:
+                            await target_label.click(force=True)
+                            await self._delay()
+                            # Проверяем, что resume-title обновился
+                            new_title = await page.locator('[data-qa="resume-title"]').first.inner_text()
+                            logger.info(
+                                "resume_selected job_id=%s code=%s id=%s title=%r",
+                                vacancy.id, resume_code, resume_id, new_title.strip()[:80],
+                            )
+                        else:
+                            logger.warning(
+                                "resume_label_not_found job_id=%s id=%s", vacancy.id, resume_id,
+                            )
+                            # Закрываем список, чтобы не мешал
+                            await page.keyboard.press("Escape")
+                    else:
+                        logger.warning("resume_title_not_visible job_id=%s", vacancy.id)
+                except Exception as e:
+                    logger.warning("resume_selection_failed job_id=%s err=%s", vacancy.id, e)
+                    try:
+                        await page.keyboard.press("Escape")
+                    except Exception:
+                        pass
+            else:
+                logger.warning("resume_id_not_resolved job_id=%s code=%s", vacancy.id, resume_code)
 
             if await page.locator('textarea[name^="task_"]').count() > 0:
                 raise QuestionnaireRequiredError("questionnaire_required")
