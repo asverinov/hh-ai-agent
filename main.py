@@ -356,6 +356,33 @@ async def process_vacancy(
     }
     evaluation_json = json.dumps(evaluation_data, ensure_ascii=False)
 
+    # Запись в evaluations (для мульти-LLM сравнения)
+    llm_meta = database.latest_llm_request_meta(summary.id)
+    if llm_meta is not None:
+        try:
+            database.record_evaluation(
+                vacancy_id=summary.id,
+                llm_request_id=llm_meta["id"],
+                provider=llm_meta["provider"],
+                model=llm_meta["model"],
+                prompt_version=llm_meta["prompt_version"],
+                suitable=suitability.suitable,
+                confidence=suitability.confidence,
+                verdict=suitability.verdict,
+                requirements_json=evaluation_json,
+                is_calibration=0,
+            )
+            logger.debug(
+                "evaluation_recorded job_id=%s model=%s pv=%s",
+                summary.id, llm_meta["model"], llm_meta["prompt_version"],
+            )
+        except Exception as exc:
+            logger.warning(
+                "record_evaluation_failed job_id=%s error=%s", summary.id, exc,
+            )
+    else:
+        logger.debug("record_evaluation_skipped_no_meta job_id=%s", summary.id)
+
     if not suitability.suitable:
         pesec_on_reject(summary.title, reason=f"LLM: {suitability.verdict}")
         database.transition(
