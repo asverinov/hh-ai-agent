@@ -28,12 +28,13 @@ REPO = Path(__file__).resolve().parent.parent
 DB = REPO / "agent.db"
 REF_PROMPT = REPO / "docs/datasets/calibration_reference_prompt_20261017.txt"
 REF_RULES = REPO / "docs/datasets/calibration_reference_rules_20261017.txt"
+MANUAL_LABELS = REPO / "docs/datasets/manual_labels_20261017.txt"
 OUT_CSV = REPO / "docs/datasets/calibration_full_matrix.csv"
 
 GIGA_MODELS = ["GigaChat-2-Pro", "GigaChat-2-Max", "GigaChat-3-Pro", "GigaChat-3-Ultra"]
 AITUNNEL_MODELS = ["deepseek-v4.1-flash", "deepseek-v3.2", "qwen3.7-flash"]
 DB_MODELS = GIGA_MODELS + AITUNNEL_MODELS
-ALL_COLS = DB_MODELS + ["DS-prompt", "DS-rules"]
+ALL_COLS = DB_MODELS + ["DS-prompt", "DS-rules", "Manual"]
 
 
 def load_db_evaluations() -> dict[str, dict]:
@@ -94,6 +95,23 @@ def load_ds_rules(path: Path) -> dict[str, bool]:
     return result
 
 
+def load_manual_labels(path: Path) -> dict[str, str]:
+    """{vacancy_id: 'approve'|'reject'|'borderline'}."""
+    if not path.exists():
+        return {}
+    result: dict[str, str] = {}
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        parts = [p.strip() for p in line.split("|")]
+        if len(parts) >= 2:
+            vid, verdict = parts[0], parts[1].lower()
+            if verdict in ("approve", "reject", "borderline"):
+                result[vid] = verdict
+    return result
+
+
 def fmt(v: bool | None) -> str:
     if v is None:
         return "  —  "
@@ -104,6 +122,7 @@ def main() -> int:
     db = load_db_evaluations()
     ds_prompt = load_ds_prompt(REF_PROMPT)
     ds_rules = load_ds_rules(REF_RULES)
+    manual = load_manual_labels(MANUAL_LABELS)
 
     print(f"INFO: DB вакансий с оценками: {len(db)}")
     for m in DB_MODELS:
@@ -111,6 +130,10 @@ def main() -> int:
         print(f"  {m}: {n}")
     print(f"INFO: DS-prompt вакансий: {len(ds_prompt)}")
     print(f"INFO: DS-rules вакансий: {len(ds_rules)}")
+    print(f"INFO: Manual labels: {len(manual)}")
+    if manual:
+        from collections import Counter
+        print(f"  распределение: {dict(Counter(manual.values()))}")
 
     all_ids = sorted(set(db) | set(ds_prompt) | set(ds_rules))
     if not all_ids:
@@ -125,6 +148,16 @@ def main() -> int:
             row[m] = db.get(vid, {}).get(m)
         row["DS-prompt"] = ds_prompt.get(vid)
         row["DS-rules"] = ds_rules.get(vid)
+        mv = manual.get(vid)
+        if mv == "approve":
+            row["Manual"] = True
+        elif mv == "reject":
+            row["Manual"] = False
+        elif mv == "borderline":
+            # borderline считаем как «нет» для production, но отдельно логируем
+            row["Manual"] = None
+        else:
+            row["Manual"] = None
         matrix[vid] = row
 
     # Заголовки
@@ -172,8 +205,9 @@ def main() -> int:
     # Сводка консенсуса
     print()
     print("=== Консенсус ===")
+    total_sources = len(ALL_COLS)
     for k in sorted(stats_agree.keys(), reverse=True):
-        print(f"  {k}/6 согласны: {stats_agree[k]} вакансий")
+        print(f"  {k}/{total_sources} согласны: {stats_agree[k]} вакансий")
 
     # Pairwise agreement
     print()
