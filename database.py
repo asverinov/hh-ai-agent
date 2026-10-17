@@ -1253,6 +1253,35 @@ class Database:
             )
             return cursor.rowcount == 1
 
+    def latest_llm_request_meta(self, vacancy_id: str) -> dict | None:
+        """Последний успешный vacancy_analysis для вакансии.
+
+        Возвращает id, provider, model, prompt_version или None.
+        Используется для записи в evaluations после assess().
+        """
+        with self._connect() as connection:
+            connection.row_factory = sqlite3.Row
+            row = connection.execute(
+                """
+                SELECT id, provider, model, prompt_version
+                FROM llm_requests
+                WHERE vacancy_id = ?
+                  AND operation = 'vacancy_analysis'
+                  AND success = 1
+                ORDER BY id DESC
+                LIMIT 1
+                """,
+                (vacancy_id,),
+            ).fetchone()
+        if row is None:
+            return None
+        return {
+            "id": row["id"],
+            "provider": row["provider"],
+            "model": row["model"],
+            "prompt_version": row["prompt_version"] or "",
+        }
+
     def llm_requests_today(self, now: datetime) -> int:
         start, end = self._day_bounds(now)
         with self._connect() as connection:
