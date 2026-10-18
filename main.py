@@ -5,6 +5,7 @@ import argparse
 import asyncio
 import hashlib
 import logging
+import os
 import random
 import sys
 from collections import Counter
@@ -26,7 +27,9 @@ from instance_lock import AlreadyRunningError, single_instance
 from llm.base import LLMProvider
 from llm.errors import LLMError
 from llm.factory import create_llm_provider
+from llm.managed import ManagedLLMProvider
 from llm.mistral_keys import MistralKeyCipher, MistralKeyManager
+from llm.providers.openai_compatible import OpenAICompatibleProvider
 from llm.types import LLMRequest
 from logging_setup import configure_logging
 from tg_bot import AgentControl, TelegramService
@@ -196,6 +199,50 @@ def format_auto_batch_report(
     return "\n".join(lines)
 
 
+def _load_cover_letter_digest() -> str:
+    """Загружает дайджест сопроводов из docs/datasets/ds_cover_letter_digest.md.
+
+    Возвращает пустую строку, если файла нет (fallback на старый промпт).
+    """
+    path = Path("docs/datasets/ds_cover_letter_digest.md")
+    if not path.exists():
+        logger.warning("cover_letter_digest_not_found path=%s", path)
+        return ""
+    try:
+        return path.read_text(encoding="utf-8")
+    except Exception as exc:
+        logger.warning("cover_letter_digest_read_failed error=%s", exc)
+        return ""
+
+
+def _create_cover_letter_analyzer(
+    settings: Settings, database: Database,
+) -> VacancyAnalyzer | None:
+    """Создаёт отдельный analyzer для сопроводов через AITUNNEL.
+
+    Возвращает None, если AITUNNEL_API_KEY не задан (fallback на штатный analyzer).
+    """
+    api_key = (settings.llm.aitunnel_api_key or "").strip()
+    base_url = (
+        settings.llm.aitunnel_base_url
+        or "https://api.aitunnel.ru/v1"
+    ).strip()
+    if not api_key:
+        logger.warning(
+            "cover_letter_analyzer_disabled reason=no_aitunnel_api_key"
+        )
+        return None
+    adapter = OpenAICompatibleProvider(
+        base_url, api_key, json_mode=False, reasoning_enabled=None,
+    )
+    provider = ManagedLLMProvider(
+        adapter, database,
+        max_retries=settings.llm.max_retries,
+        max_requests_per_day=1000,
+    )
+    return VacancyAnalyzer(settings, provider)
+
+
 async def process_vacancy(
     summary: VacancySummary,
     settings: Settings,
@@ -206,6 +253,9 @@ async def process_vacancy(
     *,
     approval_service: ApprovalService | None = None,
     now_factory: Callable[[], datetime] | None = None,
+    cover_letter_analyzer: VacancyAnalyzer | None = None,
+    cover_letter_digest: str = "",
+    cover_letter_session_id: str = "cover-letter-main",
 ) -> VacancyProcessResult:
     pesec_on_analyzing(summary.title)
     clock = now_factory or (lambda: datetime.now(UTC))
@@ -437,9 +487,17 @@ async def process_vacancy(
     )
 
     if settings.enable_cover_letter_generation:
-        letter = await analyzer.generate_cover_letter(
+        _cl_analyzer = cover_letter_analyzer if cover_letter_analyzer is not None else analyzer
+        _cl_kwargs = {}
+        if cover_letter_analyzer is not None:
+            _cl_kwargs["model_override"] = getattr(
+                settings, "cover_letter_model", "deepseek-v3.2"
+            )
+            _cl_kwargs["system_override"] = cover_letter_digest
+            _cl_kwargs["session_id"] = cover_letter_session_id
+        letter = await _cl_analyzer.generate_cover_letter(
             summary.title, details.description, company_name=details.company,
-            vacancy_id=summary.id,
+            vacancy_id=summary.id, **_cl_kwargs,
         )
         if not letter.strip():
             database.transition(
@@ -531,6 +589,9 @@ async def run_search_cycle(
     approval_service: ApprovalService | None = None,
     auto_apply_batch_limit: int | None = None,
     now_factory: Callable[[], datetime] | None = None,
+    cover_letter_analyzer: VacancyAnalyzer | None = None,
+    cover_letter_digest: str = "",
+    cover_letter_session_id: str = "cover-letter-main",
 ) -> SearchRun:
     if auto_apply_batch_limit is not None and auto_apply_batch_limit < 1:
         raise ValueError("auto_apply_batch_limit must be positive")
@@ -558,6 +619,9 @@ async def run_search_cycle(
             analyzer,
             telegram,
             approval_service=approval_service,
+            cover_letter_analyzer=cover_letter_analyzer,
+            cover_letter_digest=cover_letter_digest,
+            cover_letter_session_id=cover_letter_session_id,
             now_factory=now,
         )
         stats.record(result)
@@ -781,6 +845,9 @@ async def retry_due_analyses(
     control: AgentControl,
     *,
     now_factory: Callable[[], datetime] | None = None,
+    cover_letter_analyzer: VacancyAnalyzer | None = None,
+    cover_letter_digest: str = "",
+    cover_letter_session_id: str = "cover-letter-main",
 ) -> None:
     clock = now_factory or (lambda: datetime.now(UTC))
     now = clock()
@@ -805,6 +872,9 @@ async def retry_due_analyses(
             analyzer,
             telegram,
             now_factory=clock,
+            cover_letter_analyzer=cover_letter_analyzer,
+            cover_letter_digest=cover_letter_digest,
+            cover_letter_session_id=cover_letter_session_id,
         )
 
 
@@ -819,6 +889,9 @@ async def agent_loop(
     *,
     now_factory: Callable[[], datetime] | None = None,
     randint: Callable[[int, int], int] = random.randint,
+    cover_letter_analyzer: VacancyAnalyzer | None = None,
+    cover_letter_digest: str = "",
+    cover_letter_session_id: str = "cover-letter-main",
 ) -> None:
     clock = now_factory or (lambda: datetime.now(UTC))
     next_auto_batch: datetime | None = None
@@ -860,6 +933,9 @@ async def agent_loop(
                         approval_service=approval_service,
                         auto_apply_batch_limit=batch_size,
                         now_factory=clock,
+                        cover_letter_analyzer=cover_letter_analyzer,
+                        cover_letter_digest=cover_letter_digest,
+                        cover_letter_session_id=cover_letter_session_id,
                     )
                     if control.paused:
                         control.next_run_at = None
@@ -899,7 +975,10 @@ async def agent_loop(
                 )
         else:
             run = await run_search_cycle(
-                settings, database, hh_client, analyzer, telegram, control
+                settings, database, hh_client, analyzer, telegram, control,
+                cover_letter_analyzer=cover_letter_analyzer,
+                cover_letter_digest=cover_letter_digest,
+                cover_letter_session_id=cover_letter_session_id,
             )
             control.next_run_at = (
                 None
@@ -972,6 +1051,25 @@ async def run(settings: Settings) -> None:
         )
         analyzer = VacancyAnalyzer(settings, llm_provider)
 
+        # Отдельный analyzer для сопроводов через AITUNNEL (если включено)
+        cover_letter_analyzer = None
+        cover_letter_digest = ""
+        if settings.enable_cover_letter_generation:
+            cover_letter_digest = _load_cover_letter_digest()
+            if cover_letter_digest:
+                cover_letter_analyzer = _create_cover_letter_analyzer(
+                    settings, database
+                )
+                if cover_letter_analyzer is not None:
+                    logger.info(
+                        "cover_letter_analyzer_ready digest_len=%s",
+                        len(cover_letter_digest),
+                    )
+                else:
+                    logger.warning(
+                        "cover_letter_analyzer_fallback_to_main_analyzer"
+                    )
+
         # Bootstrap: сообщить о старте + отправить все pending_approval в TG
         # Делаем ДО синхронизации applied_jobs (она занимает ~2.5 минуты)
         try:
@@ -1032,6 +1130,9 @@ async def run(settings: Settings) -> None:
                 telegram,
                 control,
                 approval_service,
+                cover_letter_analyzer=cover_letter_analyzer,
+                cover_letter_digest=cover_letter_digest,
+                cover_letter_session_id="cover-letter-main",
             ),
         )
     finally:

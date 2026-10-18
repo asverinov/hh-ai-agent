@@ -252,7 +252,7 @@ def test_run_shares_mistral_manager_and_assigns_telegram_notifier(
         async def stop(self) -> None:
             return None
 
-    async def fake_agent_loop(*_args) -> None:
+    async def fake_agent_loop(*_args, **_kwargs) -> None:
         return None
 
     monkeypatch.setattr(main_module, "MistralKeyManager", FakeMistralManager, raising=False)

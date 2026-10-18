@@ -57,6 +57,7 @@ class Vacancy:
     salary_from: int | None = None
     salary_to: int | None = None
     salary_currency: str = ""
+    description: str = ""
 
 
 
@@ -517,6 +518,9 @@ class Database:
             analysis_next_retry_at=row["analysis_next_retry_at"],
             evaluation_json=(
                 row["evaluation_json"] if "evaluation_json" in row.keys() else ""
+            ),
+            description=(
+                row["description"] if "description" in row.keys() else ""
             ),
         )
 
