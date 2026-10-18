@@ -99,6 +99,8 @@ class LLMSettings:
     openai_compatible_api_key: str
     openai_compatible_json_mode: bool
     openai_compatible_reasoning_enabled: bool | None = None
+    aitunnel_api_key: str = ""
+    aitunnel_base_url: str = "https://api.aitunnel.ru/v1"
 
 
 @dataclass(frozen=True)
@@ -586,6 +588,10 @@ def load_settings(
                 if values.get("OPENAI_COMPATIBLE_REASONING_ENABLED", "").strip()
                 else None
             ),
+            aitunnel_api_key=values.get("AITUNNEL_API_KEY", "").strip(),
+            aitunnel_base_url=values.get(
+                "AITUNNEL_BASE_URL", "https://api.aitunnel.ru/v1"
+            ).strip(),
         ),
         app_mode=app_mode,
         enable_real_apply=enable_real_apply,
