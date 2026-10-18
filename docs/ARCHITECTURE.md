@@ -210,6 +210,26 @@ approval.approve_and_apply -> hh_client.submit_application
 
 ## NON-OBVIOUS (что легко упустить)
 
+- **`os.environ` перезаписывает `.env`** — в `config.py:load_settings`:
+  `values.update(os.environ)`. Если делал `source .env` для скриптов —
+  в этом shell `main.py` получит **старые** значения (например,
+  `ENABLE_COVER_LETTER_GENERATION=false`). **Правило:** агент запускать в
+  **чистом shell** (без `source .env`); `.env` подгружается через `load_settings`.
+
+- **`cover_letter_analyzer` — отдельный провайдер.** AITUNNEL создаётся
+  в `run()` через `_create_cover_letter_analyzer()`, если
+  `ENABLE_COVER_LETTER_GENERATION=true` и `AITUNNEL_API_KEY` задан.
+  Прокидывается через 5 функций: `process_vacancy`, `run_search_cycle`,
+  `retry_due_analyses`, `agent_loop`, `run()`. В `process_vacancy` — если
+  `cover_letter_analyzer` не None, генерирует письмо через AITUNNEL с
+  `system_override=digest`, `session_id="cover-letter-main"`,
+  `model_override="deepseek-v3.2"`. Иначе — fallback на штатный analyzer (GigaChat).
+
+- **Retry в `generate_cover_letter` теряет дайджест.** На первом провале
+  `_safe_letter` код заменяет `system_instructions` на **короткую** инструкцию
+  («Напиши ТОЛЬКО 3 абзаца…») — **без дайджеста**. Модель справляется, но
+  теряет весь контекст DS. **TODO:** добавить дайджест и на retry.
+
 - **`record_evaluation` в `process_vacancy`** — пишется ДО `request_approval`. То есть `evaluations` наполняется сразу после assess, независимо от того, куда пойдёт вакансия (pending/approved/rejected).
 
 - **`best_resume` в `evaluation_json`** — сохраняется в `process_vacancy` (поле `"best_resume": suitability.best_resume`). Используется в `submit_application` через `json.loads(vacancy.evaluation_json)`.
@@ -238,6 +258,9 @@ approval.approve_and_apply -> hh_client.submit_application
 
 ## CHANGELOG (по коммитам)
 
+- **B3 (18.10)**: интеграция генерации сопроводительных писем через AITUNNEL
+  в pipeline: `cover_letter_analyzer` через 5 функций, `aitunnel_*` в
+  `LLMSettings`, `description` в `Vacancy`, `ENABLE_COVER_LETTER_GENERATION=true`
 - `f5c2551` (18.10): B2 — скрипт генерации сопроводительных писем через AITUNNEL + дайджест (~27 КБ)
 - `202deb6` (18.10): B1 — `generate_cover_letter` получает `system_override`/`session_id`/`model_override`; лимит длины `max_length + 400` (1500 при 1100)
 - `a3a5087` (18.10): A3 — apply с best_resume (клик по `label[data-magritte-select-option]` в dropdown hh.ru)
