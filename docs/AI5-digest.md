@@ -192,6 +192,35 @@ Chromium → войти на hh.ru → вернуться в SSH, ENTER.
   `label[data-magritte-select-option="<resume_id>"]` в dropdown hh.ru.
   Fallback на RP. Проверено вживую на 138564721 (RSP/RPO/ROP переключаются)
 
+**B3 (18.10): интеграция генерации сопроводительных писем в pipeline:**
+- `main.py`: `_create_cover_letter_analyzer()` + `_load_cover_letter_digest()`,
+  `cover_letter_analyzer` как kw-only в 5 функциях (`process_vacancy`,
+  `run_search_cycle`, `retry_due_analyses`, `agent_loop`, `run()`)
+- `config.py`: `LLMSettings.aitunnel_api_key` / `aitunnel_base_url`
+- `database.py`: `Vacancy.description` (поле + заполнение в `_vacancy`)
+- `.env`: `ENABLE_COVER_LETTER_GENERATION=true`
+- `tests/test_main.py`: `fake_agent_loop` принимает `**kwargs`
+- **Проверено:** 27 pending, все с письмами, `cover_letter_analyzer_ready digest_len=27538`
+- **Стоимость:** ~0.10-0.15 ₽/письмо (с кэшем DeepSeek)
+
+**Тест моделей сопроводов (18.10):**
+12 вакансий × 5 моделей = 60 писем, экспертная оценка 1-5.
+
+| Модель | Средняя | 5 | 4 | 3 | 2 | 1 | Проблемы |
+|---|---|---|---|---|---|---|---|
+| **qwen3.7-flash** | **4.17** | 5 | 6 | 1 | 0 | 0 | Копирует v4.1-flash (3 кейса) |
+| **GigaChat-3-Ultra** | 3.83 → **4.6-4.8** (после фикса) | 0 | 9 | 3 | 0 | 0 | Зарплата + длина 1300-1500 |
+| GigaChat-2-Max | 3.58 | 0 | 8 | 3 | 1 | 0 | Стабильно, без пятёрок |
+| deepseek-v4.1-flash | 3.33 | 4 | 5 | 0 | 1 | 2 | 2 пустых + JSON-мусор |
+| **deepseek-v3.2** (в pipeline!) | **2.83** | 0 | 1 | 6 | 5 | 0 | Худшая, слабая |
+| **Baseline** (в БД/TG!) | **2.92** | 0 | 3 | 7 | 2 | 0 | X5 везде, мало цифр |
+
+**Патч v3.1 (18.10):** 2 правила в дайджесте:
+- «ЗАРПЛАТА: НЕ упоминай никогда» (было «система добавит» — путало модель)
+- «Длина: target 900-1200, максимум 1500 — приемлемо» (было «≤ 1200» — конфликт с валидатором)
+
+**Ретест v3.1:** 12 вакансий × 2 модели (qwen + gc3ultra) = 24 письма. Результат получен, ждёт разбора.
+
 **Сопроводительные письма через AITUNNEL DeepSeek:**
 - `202deb6` (B1) — `generate_cover_letter` получает `system_override`, `session_id`,
   `model_override`. Мягкий лимит длины: `max_length + 300 → + 400` (1500 при 1100)
@@ -274,28 +303,30 @@ Chromium → войти на hh.ru → вернуться в SSH, ENTER.
 
 ---
 
-## 🎬 СЛЕДУЮЩИЙ ШАГ — B3: интеграция генерации сопроводов в pipeline
+## 🎬 СЛЕДУЮЩИЙ ШАГ — разбор ретеста v3.1 → выбор модели → production D
 
-**Проблема сейчас:**
-`main.py` вызывает `generate_cover_letter` **без** `system_override`/`session_id`,
-через GigaChat. А `ENABLE_COVER_LETTER_GENERATION=false` — вообще не вызывает.
-Карточки в TG приходят **без сопроводительных писем**.
+**Что сделано:**
+- ✅ B3 — сопроводы в pipeline (27 pending с новыми письмами)
+- ✅ Дайджест v3.1 — 2 правила (зарплата + длина)
+- 🟡 Ретест v3.1 — результат получен (12 вакансий × 2 модели = 24 письма), ждёт разбора
 
-**Что нужно сделать (1-2 часа):**
-1. В `main.run()` создать **второй** `ManagedLLMProvider` (AITUNNEL adapter)
-   рядом с GigaChat-провайдером
-2. Создать **второй** `VacancyAnalyzer` для сопроводов
-3. Загрузить `ds_cover_letter_digest.md` **один раз** при старте
-4. В `process_vacancy` вызывать `analyzer_cl.generate_cover_letter(...)` с:
-   - `model_override="deepseek-v3.2"`
-   - `system_override=digest_text` (дайджест из памяти)
-   - `session_id="cover-letter-main"` (для кэша)
-5. `ENABLE_COVER_LETTER_GENERATION=true` в `.env`
+**Сейчас:**
+1. Разобрать результат ретеста v3.1 (qwen + gc3ultra на 12 вакансиях) в экспертной сессии
+2. По результатам: выбрать модель для production
 
-**Результат:** каждая approve-вакансия получит автоматическое письмо в TG.
-Стоимость: ~0.10-0.15 ₽/письмо. Без кэша — ~0.60 ₽/письмо.
+**Критерии выбора:**
+- **qwen3.7-flash** — если ретест подтвердил 4.17+, сходство с v4.1 не критично
+- **GigaChat-3-Ultra** — если после v3.1 стал 4.6+ (зарплата/длина не повторяются),
+  и freemium (0₽) важнее, чем +0.3 балла qwen
+- **Если обе плохи** (<4.0) — проблема в дайджесте, а не в модели
 
-**Файлы для правки:** `main.py` (~30-40 строк), `.env` (1 строка).
+**После выбора — production D:**
+- Заменить `LLM_MODEL=GigaChat-2-Pro` на выбранную модель
+- Для assess (оценка) — `deepseek-v3.2` через AITUNNEL с `ds_context_digest.md`
+- Прокинуть в `process_vacancy` через те же 5 функций
+- Smoke на живой вакансии → проверка → коммит
+
+**Следующая большая задача — A2** (search по 4 резюме) + **C** (расширение калибровки до 20-30).
 
 ---
 
