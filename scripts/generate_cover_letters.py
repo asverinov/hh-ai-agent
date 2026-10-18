@@ -49,15 +49,27 @@ def load_calibration_ids(path: Path) -> list[str]:
     return [v["id"] for v in data["positive"]] + [v["id"] for v in data["negative"]]
 
 
-def fetch_vacancies(db_path: Path, ids: list[str] | None) -> list[dict]:
-    """Только вакансии с непустым description. Только suitable=true (approved)."""
+def fetch_vacancies(
+    db_path: Path, ids: list[str] | None, pending_only: bool = False,
+) -> list[dict]:
+    """Вакансии с description.
+
+    pending_only=True: только status='pending_approval' (для перегенерации).
+    pending_only=False: pending_approval + applied + approved + llm_decision=1.
+    """
     with sqlite3.connect(db_path) as conn:
         conn.row_factory = sqlite3.Row
-        where = [
-            "description != ''",
-            "(status IN ('pending_approval', 'applied', 'approved') "
-            " OR llm_decision = 1)",
-        ]
+        if pending_only:
+            where = [
+                "description != ''",
+                "status = 'pending_approval'",
+            ]
+        else:
+            where = [
+                "description != ''",
+                "(status IN ('pending_approval', 'applied', 'approved') "
+                " OR llm_decision = 1)",
+            ]
         params: list = []
         if ids:
             placeholders = ", ".join("?" for _ in ids)
@@ -121,6 +133,8 @@ async def run(args: argparse.Namespace) -> int:
         vacancies = fetch_vacancies(db_path, ids)
     elif args.all:
         vacancies = fetch_vacancies(db_path, None)
+    elif args.pending_only:
+        vacancies = fetch_vacancies(db_path, None, pending_only=True)
     else:
         print("ERROR: укажи --calibration / --ids / --all", file=sys.stderr)
         return 2
@@ -207,6 +221,8 @@ def main() -> int:
     p.add_argument("--ids", default=None, help="список vacancy_id через запятую")
     p.add_argument("--all", action="store_true",
                    help="все вакансии с description + suitable=true")
+    p.add_argument("--pending-only", action="store_true",
+                   help="только status='pending_approval' (для перегенерации)")
     p.add_argument("--model", default=DEFAULT_MODEL,
                    help=f"модель AITUNNEL (default: {DEFAULT_MODEL})")
     p.add_argument("--digest", default=DEFAULT_DIGEST,
