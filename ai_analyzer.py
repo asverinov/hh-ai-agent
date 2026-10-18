@@ -576,6 +576,9 @@ class VacancyAnalyzer:
     async def generate_cover_letter(
         self, vacancy_title: str, vacancy_description: str, company_name: str = "",
         *, vacancy_id: str | None = None,
+        model_override: str | None = None,
+        system_override: str | None = None,
+        session_id: str | None = None,
     ) -> str:
         cover = self.settings.profile.cover_letter
         greeting = "Добрый день!"
@@ -599,10 +602,14 @@ class VacancyAnalyzer:
         candidate = self._candidate()
         candidate.pop("additional_information", None)
 
-        request = self._request(
-            system_instructions=_COVER_LETTER_SYSTEM.format(
+        if system_override:
+            system_text = system_override
+        else:
+            system_text = _COVER_LETTER_SYSTEM.format(
                 body_limit=body_limit, body_limit_minus_100=body_limit - 100
-            ),
+            )
+        request = self._request(
+            system_instructions=system_text,
             payload={
                 "candidate": candidate,
                 "vacancy": vacancy,
@@ -611,6 +618,8 @@ class VacancyAnalyzer:
             operation="cover_letter",
             structured=False,
             vacancy_id=vacancy_id,
+            model_override=model_override,
+            session_id=session_id,
         )
 
         for attempt in range(2):

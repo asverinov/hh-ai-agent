@@ -97,9 +97,10 @@ def cover_letter_validation_error(
 ) -> str:
     if not text.strip():
         return "cover_letter_empty"
-    # Мягкий допуск: GigaChat плохо соблюдает точные лимиты, поэтому
-    # разрешаем письмо до max_length + 300 знаков. Жёсткий лимит — отсекаем.
-    if len(text) > max_length + 300:
+    # Мягкий допуск: LLM плохо соблюдает точные лимиты, поэтому
+    # разрешаем письмо до max_length + 400 знаков (~1500 при max=1100).
+    # Жёсткий лимит (max_length + 400) — отсекаем.
+    if len(text) > max_length + 400:
         return "cover_letter_too_long"
     if "```" in text or _MARKDOWN_LINK.search(text):
         return "cover_letter_markdown"
