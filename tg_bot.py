@@ -228,6 +228,10 @@ class TelegramService:
             | F.data.startswith("edit:")
             | F.data.startswith("mk:"),
         )
+        self.dispatcher.callback_query.register(
+            self._show_pending_callback,
+            F.data == "show_pending",
+        )
         self.dispatcher.message.register(self._text_handler)
 
     async def _command_handler(self, message: Message) -> None:
