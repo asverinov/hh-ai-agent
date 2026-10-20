@@ -490,9 +490,7 @@ async def process_vacancy(
         _cl_analyzer = cover_letter_analyzer if cover_letter_analyzer is not None else analyzer
         _cl_kwargs = {}
         if cover_letter_analyzer is not None:
-            _cl_kwargs["model_override"] = getattr(
-                settings, "cover_letter_model", "deepseek-v3.2"
-            )
+            _cl_kwargs["model_override"] = settings.llm.cover_letter_model
             _cl_kwargs["system_override"] = cover_letter_digest
             _cl_kwargs["session_id"] = cover_letter_session_id
         letter = await _cl_analyzer.generate_cover_letter(
