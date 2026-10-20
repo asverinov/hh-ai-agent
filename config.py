@@ -101,6 +101,7 @@ class LLMSettings:
     openai_compatible_reasoning_enabled: bool | None = None
     aitunnel_api_key: str = ""
     aitunnel_base_url: str = "https://api.aitunnel.ru/v1"
+    cover_letter_model: str = "qwen3.7-flash"
 
 
 @dataclass(frozen=True)
@@ -591,6 +592,9 @@ def load_settings(
             aitunnel_api_key=values.get("AITUNNEL_API_KEY", "").strip(),
             aitunnel_base_url=values.get(
                 "AITUNNEL_BASE_URL", "https://api.aitunnel.ru/v1"
+            ).strip(),
+            cover_letter_model=values.get(
+                "COVER_LETTER_MODEL", "qwen3.7-flash"
             ).strip(),
         ),
         app_mode=app_mode,
