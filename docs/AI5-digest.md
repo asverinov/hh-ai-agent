@@ -1,477 +1,465 @@
-# Дайджест сессии AI5/AI6
+Дайджест сессии AI5/AI6
+Последнее обновление: 22 октября 2026, после коммита 8c4618a (+ docs/HH-OAUTH-RECOVERY.md).
+Как использовать: в новой сессии скажи «дайджест» — тебе дадут команду cat docs/AI5-digest.md. Копируешь её вывод целиком и присылаешь. Это единственное исключение из правила «никогда не cat целые файлы».
 
-**Последнее обновление:** 18 октября 2026, после коммита `f5c2551`.
-**Как использовать:** в новой сессии скажи «дайджест» — тебе дадут команду
-`cat docs/AI5-digest.md`. Копируешь её вывод целиком и присылаешь. Это
-**единственное исключение** из правила «никогда не cat целые файлы».
+🔴 ПРАВИЛА РАБОТЫ С ОПЕРАТОРОМ
+Александр Сверинов — заказчик и оператор. Не программист.
 
----
+Команды — целиком, одним bash-блоком. Оператор копирует, вставляет, присылает вывод.
 
-## 🔴 ПРАВИЛА РАБОТЫ С ОПЕРАТОРОМ
+Патчи файлов — python-скриптом, который сам меняет + проверяет + откатывает при ошибке.
 
-Александр Сверинов — заказчик и оператор. **Не программист.**
+Цикл: ИИ даёт команду → оператор запускает, присылает вывод → ИИ анализирует → следующая.
 
-- Команды — целиком, одним `bash`-блоком. Оператор копирует, вставляет, присылает вывод.
-- Патчи файлов — python-скриптом, который сам меняет + проверяет + откатывает при ошибке.
-- Цикл: ИИ даёт команду → оператор запускает, присылает вывод → ИИ анализирует → следующая.
-- Оператор **не должен искать факты сам** — ИИ просит конкретную команду.
-- Вывод можно присылать вместе с командой.
+Оператор не должен искать факты сам — ИИ просит конкретную команду.
 
-**Жёсткие правила экономии контекста:**
-- ❌ Никогда не `cat` целые файлы. Исключение: `docs/AI5-digest.md`.
-- ✅ Только: `grep -n`, `sed -n 'X,Yp'`, `head -N`, `tail -N`, `awk`, `wc -l`.
-- ✅ `git diff` → только `--stat` или `git show <commit> -- file | head -80`.
-- ✅ Логи — только хвост: `tail -50 agent.log | grep -E "ERROR|WARNING"`.
-- ✅ Одна команда — один вывод.
-- ✅ `cp file file.bak-<что-то>` перед изменением.
-- ✅ Обновлять дайджест каждые 6–8 часов активной работы.
-- ⚠️ **При записи больших файлов** (дайджест, промпты) — маленькими блоками
-  через `cat >>` по 60-80 строк. Длинные вставки рвутся.
-- ⚠️ **В названиях задач/фаз писать полностью** — не «B1», а
-  «генерация сопроводительных писем через AITUNNEL». Аббревиатуры
-  понимают не все.
+Вывод можно присылать вместе с командой.
 
----
+Когда оператор просит «через nano» — давать --начало-- / --конец-- без вложенных markdown-блоков (внутри использовать ~~~bash, не ```).
 
-## 🎯 ЦЕЛЬ И РОЛЬ
+Жёсткие правила экономии контекста:
 
+❌ Никогда не cat целые файлы. Исключение: docs/AI5-digest.md.
+
+✅ Только: grep -n, sed -n 'X,Yp', head -N, tail -N, awk, wc -l.
+
+✅ git diff → только --stat или git show <commit> -- file | head -80.
+
+✅ Логи — только хвост: tail -50 agent.log | grep -E "ERROR|WARNING".
+
+✅ Одна команда — один вывод.
+
+✅ cp file file.bak-<что-то> перед изменением.
+
+✅ Обновлять дайджест каждые 6–8 часов активной работы.
+
+⚠️ При записи больших файлов — маленькими блоками через cat >> по 60-80 строк. Длинные вставки рвутся.
+
+⚠️ В названиях задач/фаз писать полностью — не «B1», а «генерация сопроводительных писем через AITUNNEL». Аббревиатуры понимают не все.
+
+🎯 ЦЕЛЬ И РОЛЬ
 Автоматизация поиска и оценки вакансий на hh.ru через ИИ-агента:
-поиск `similar_vacancies` → LLM-оценка → сопровод → TG-карточка →
-**ручной отклик** (`ENABLE_REAL_APPLY=true`, `AUTO_APPLY_ENABLED=false`).
+поиск similar_vacancies → LLM-оценка → сопровод → TG-карточка →
+ручной отклик (ENABLE_REAL_APPLY=true, AUTO_APPLY_ENABLED=false).
 
-**Роль:** Александр Сверинов — заказчик и оператор (ищет работу).
-**Upstream:** `fikstt2` (Евгений), `github.com/fikstt2/hh-ai-agent` — источник cherry-pick, **PR не делаем**.
-**Форк:** `github.com/asverinov/hh-ai-agent` — основная линия.
-**Ветка работы:** `my-local-work`.
+Роль: Александр Сверинов — заказчик и оператор (ищет работу).
+Upstream: fikstt2 (Евгений), github.com/fikstt2/hh-ai-agent — источник cherry-pick, PR не делаем.
+Форк: github.com/asverinov/hh-ai-agent — основная линия.
+Ветка работы: my-local-work.
 
----
+🏗️ АРХИТЕКТУРА
+Хост: Windows, ноут HP, i5, 32 ГБ. Hyper-V → Ubuntu 24.04 (виртуалка hh-ag).
+Сеть: InternalSwitch, NAT, IP 192.168.100.10. SSH: ssh a@192.168.100.10.
+Remote'ы git:
 
-## 🏗️ АРХИТЕКТУРА
+origin = asverinov/hh-ai-agent
 
-**Хост:** Windows, ноут HP, i5, 32 ГБ. Hyper-V → Ubuntu 24.04 (виртуалка `hh-ag`).
-**Сеть:** InternalSwitch, NAT, IP `192.168.100.10`. SSH: `ssh a@192.168.100.10`.
-**Remote'ы git:**
-- `origin` = asverinov/hh-ai-agent
-- `upstream` = fikstt2/hh-ai-agent
-- Ветка `my-local-work` привязана к `origin/my-local-work`
-- Credentials: токен в `~/.git-credentials` (mode 600). Push без пароля.
+upstream = fikstt2/hh-ai-agent
 
-**Telegram:** @asverinov_bot, user_id=215424700.
+Ветка my-local-work привязана к origin/my-local-work
 
-**gpt2giga:** внутри виртуалки на `localhost:8090` (Anthropic-compatible `/v1/messages`).
+Credentials: токен в ~/.git-credentials (mode 600). Push без пароля.
 
-**AITUNNEL:** внешний OpenAI-совместимый шлюз, `https://api.aitunnel.ru/v1`.
-Ключ в `.env` (`AITUNNEL_API_KEY`, `AITUNNEL_BASE_URL`).
-**Баланс на 18.10.2026:** 1079.24 ₽.
-**Модели:** deepseek-v3.2 (36/54 ₽ за 1M), deepseek-v4.1-flash (30/120 ₽),
-qwen3.7-flash (6/26 ₽). Кэш контекста работает через `session_id`
-(89% экономии после первого вызова).
+Telegram: @asverinov_bot, user_id=215424700.
 
-**4 резюме на hh.ru** (config/resumes.yaml):
-- RP — Руководитель проектов (активное, поиск идёт по нему)
-- RSP — Руководитель сервисных проектов
-- RPO — Руководитель проектного офиса
-- ROP — Руководитель отдела поддержки
+gpt2giga: внутри виртуалки на localhost:8090 (Anthropic-compatible /v1/messages). Legacy — GigaChat-2-Pro больше не используется в production, но сервис жив.
 
-**Search:** пока только по RP (через `search_by_resume`).
-Задел на будущее: поиск по всем 4 резюме + дедупликация.
+AITUNNEL: внешний OpenAI-совместимый шлюз, https://api.aitunnel.ru/v1.
+Ключ в .env (AITUNNEL_API_KEY, AITUNNEL_BASE_URL).
+Баланс на 22.10.2026: ~1027 ₽ (было 1079, потрачено ~52₽ на DeepSeek за прогон 96 вызовов).
 
----
+4 резюме на hh.ru (config/resumes.yaml):
 
-## ⚙️ АВТОСТАРТ СЕРВИСОВ (сделано в AI5)
+RP — Руководитель проектов (активное, поиск идёт по нему)
 
-После ребута ноута всё поднимается автоматически, `Linger=yes`.
-4 systemd-user-юнита в `~/.config/systemd/user/`:
+RSP — Руководитель сервисных проектов
 
-| Юнит | Что запускает | Порт/дисплей |
-|---|---|---|
-| `hh-xvfb.service` | Xvfb :99 (1280x800x24) + ExecStartPre чистит lock | :99 |
-| `hh-fluxbox.service` | fluxbox WM | :99 |
-| `hh-x11vnc.service` | x11vnc (VNC-сервер) | :5900 |
-| `hh-gpt2giga.service` | gpt2giga --port 8090 --mode DEV | :8090 |
-
-**Секреты:** `~/.config/systemd/user/hh-gigachat.env` (mode 600).
-Токен меняешь — `systemctl --user restart hh-gpt2giga`.
+RPO — Руководитель проектного офиса
 
-**Отключён паразит:** system-level `/etc/systemd/system/xvfb.service`
-(`disabled`, `inactive`) — занимал `:99` от root.
-
-**Проверка сервисов:**
-
-    systemctl --user --no-pager -l status hh-xvfb hh-fluxbox hh-x11vnc hh-gpt2giga | grep -E "●|Active:"
-    ss -tlnp 2>/dev/null | grep -E ":(8090|5900)\b"
-
-**VNC-вход на hh.ru (если сессия протухла):**
-Windows TightVNC Viewer → `192.168.100.10:5900` (пароль пустой) →
-Chromium → войти на hh.ru → вернуться в SSH, ENTER.
-
-**Агента запускаем вручную** (не через сервис):
-
-    cd ~/hh-ai-agent && source venv/bin/activate && export DISPLAY=:99
-    python3 main.py
-
-Остановка — `Ctrl+C` в его вкладке.
-
----
-
-## 🧠 МОДЕЛИ — после калибровки P4 (18 окт)
-
-**Текущая production-модель для оценки:** `LLM_MODEL=GigaChat-2-Pro`.
-**Но по калибровке 2-Pro — аутсайдер.** Решение отложено до production-фазы.
-
-**Результаты калибровки на 8 ручных (Manual):**
-
-| Модель | F1 после обогащения | Approve/19 | Цена/1M |
-|---|---|---|---|
-| **deepseek-v3.2** (AITUNNEL) | **1.00** ⭐ | 7 (37%) | ~36/54 ₽ |
-| **qwen3.7-flash** (AITUNNEL) | **1.00** ⭐ | 13 (68%) | ~6/26 ₽ |
-| GigaChat-2-Max | 0.80 | 9 (47%) | freemium |
-| DS-prompt (web) | 0.80 | 14 (74%) | — |
-| GigaChat-3-Ultra | 0.67 | 12 (63%) | freemium |
-| deepseek-v4.1-flash | 0.67 | 11 (61%) | 30/120 ₽ |
-| GigaChat-2-Pro | 0.50 | 9 (47%) | freemium |
-| GigaChat-3-Pro | 0.50 | 15 (79%) | freemium |
-| **DS-rules (web, эталон)** | **1.00** | 13 (68%) | — |
-
-**Ключевые открытия:**
-- **Обогащённый промпт** (дайджест DS ~33 КБ как system prompt) поднял F1
-  у v3.2 с 0.67 → **1.00**, у qwen с 0.40 → **1.00**.
-- **Кэш DeepSeek** через `session_id` = **89% экономии** (0.72 → 0.08 ₽/вызов).
-- **2-Pro системный аутсайдер** — 47.4% согласия с 3-Pro/v3.2/qwen (хуже случайного).
-- **qwen3.7-flash** — самый дешёвый (~6₽/1M) и с F1=1.00, но медленный
-  (67-85 сек/вызов). **v3.2** — быстрее (~20-30 сек), дороже в 5 раз, F1=1.00.
-
-**Решение по production:** **deepseek-v3.2** (баланс скорости и цены при
-одинаковом качестве). Замена GigaChat — в финале сессии.
-
-**Freemium GigaChat:** Ultra 50M / Max 25M / Pro 38M токенов до окт 2027.
-
-**Признаки правил в промпте GigaChat:**
-- Правило 19 (~строка 407): СТОП-ФАКТОРЫ
-- Правило 18a (~строка 441): отраслевой опыт — формула M/N
-- Правило 23 (~строка 457): переносимые роли
-- Правило 24 (~строка 470): переносимые AI/LLM-требования
-- `prompt_version` = `b4b61dcb327e` (хеш только system_instructions)
-
----
-
-## ✅ ЧТО СДЕЛАНО В AI5/AI6 (12 коммитов)
-
-**Наблюдаемость:**
-- `e62dad4` — `description`, `vacancy_id`, `prompt_version`, `raw_response` в `llm_requests`
-- `173e1a0` — `prompt_version = sha256(system_instructions)[:12]` (не зависит от вакансии)
-- `e8097bb` — `evaluation_json` для `rejected_by_llm` и `pending_approval`
-  через `transition`/`request_approval`
-
-**Правила оценки:**
-- `f31992b` — правила 18a (формула пропорции M/N для отрасли) + 23
-  (симметричное чтение названия и тела). `prompt_version: e9fc00be54c6 → b4b61dcb327e`
-
-**Пагинация + seen_vacancies + evaluations:**
-- `05fc556` — `MAX_PAGES_PER_QUERY=0` (без лимита, до `pages` из API; было 2 — теряли 94%)
-  - `seen_vacancies` — архив всех ID из API (иначе page=0 вечно даёт дубли)
-  - `evaluations` — мульти-LLM таблица с `UNIQUE(vacancy_id, model, prompt_version)`
-  - `page_callback` → TG-отчёты `📄 Стр. N/M` (флаг `TG_REPORT_PER_PAGE`)
-
-**Инфраструктура датасета P4:**
-- `4a518b9` — `prompts.json`, `export_raw.py`, README
-- `07d0062` — ручная разметка 11 вакансий (8 approve/reject + 3 borderline)
-- `28e412e` — `manual_labels` в git (было в `.gitignore`)
-- `a528e57` — `model_override` + `evaluations` pipeline
-- `8d937c9` — скрипты `evaluate_models.py`, `compare_all.py`, `export_calibration_blind.py`
-
-**Обогащение промпта + кэш:**
-- `d86ee70` — `session_id` для кэша DeepSeek, `system_override` в `_request/assess`,
-  `docs/datasets/ds_context_digest.md` (~33 КБ, дайджест DS).
-  F1: v3.2 0.67 → **1.00**, qwen 0.40 → **1.00**
-
-**best_resume — выбор резюме для отклика:**
-- `2e4fecb` (A1) — `SuitabilityResult.best_resume` (RP/RSP/RPO/ROP),
-  TG-карточка показывает «Резюме: X», `evaluation_json` содержит `best_resume`
-- `a3a5087` (A3) — в `submit_application` клик по
-  `label[data-magritte-select-option="<resume_id>"]` в dropdown hh.ru.
-  Fallback на RP. Проверено вживую на 138564721 (RSP/RPO/ROP переключаются)
-
-**B3 (18.10): интеграция генерации сопроводительных писем в pipeline:**
-- `main.py`: `_create_cover_letter_analyzer()` + `_load_cover_letter_digest()`,
-  `cover_letter_analyzer` как kw-only в 5 функциях (`process_vacancy`,
-  `run_search_cycle`, `retry_due_analyses`, `agent_loop`, `run()`)
-- `config.py`: `LLMSettings.aitunnel_api_key` / `aitunnel_base_url`
-- `database.py`: `Vacancy.description` (поле + заполнение в `_vacancy`)
-- `.env`: `ENABLE_COVER_LETTER_GENERATION=true`
-- `tests/test_main.py`: `fake_agent_loop` принимает `**kwargs`
-- **Проверено:** 27 pending, все с письмами, `cover_letter_analyzer_ready digest_len=27538`
-- **Стоимость:** ~0.10-0.15 ₽/письмо (с кэшем DeepSeek)
-
-**Тест моделей сопроводов (18.10):**
-12 вакансий × 5 моделей = 60 писем, экспертная оценка 1-5.
-
-| Модель | Средняя | 5 | 4 | 3 | 2 | 1 | Проблемы |
-|---|---|---|---|---|---|---|---|
-| **qwen3.7-flash** | **4.17** | 5 | 6 | 1 | 0 | 0 | Копирует v4.1-flash (3 кейса) |
-| **GigaChat-3-Ultra** | 3.83 → **4.6-4.8** (после фикса) | 0 | 9 | 3 | 0 | 0 | Зарплата + длина 1300-1500 |
-| GigaChat-2-Max | 3.58 | 0 | 8 | 3 | 1 | 0 | Стабильно, без пятёрок |
-| deepseek-v4.1-flash | 3.33 | 4 | 5 | 0 | 1 | 2 | 2 пустых + JSON-мусор |
-| **deepseek-v3.2** (в pipeline!) | **2.83** | 0 | 1 | 6 | 5 | 0 | Худшая, слабая |
-| **Baseline** (в БД/TG!) | **2.92** | 0 | 3 | 7 | 2 | 0 | X5 везде, мало цифр |
-
-**Патч v3.1 (18.10):** 2 правила в дайджесте:
-- «ЗАРПЛАТА: НЕ упоминай никогда» (было «система добавит» — путало модель)
-- «Длина: target 900-1200, максимум 1500 — приемлемо» (было «≤ 1200» — конфликт с валидатором)
-
-**Ретест v3.1:** 12 вакансий × 2 модели (qwen + gc3ultra) = 24 письма. Результат получен, ждёт разбора.
-
-**Сопроводительные письма через AITUNNEL DeepSeek:**
-- `202deb6` (B1) — `generate_cover_letter` получает `system_override`, `session_id`,
-  `model_override`. Мягкий лимит длины: `max_length + 300 → + 400` (1500 при 1100)
-- `f5c2551` (B2) — скрипт `scripts/generate_cover_letters.py`,
-  `docs/datasets/ds_cover_letter_digest.md` (~27 КБ, дайджест от DS web).
-  Проверено: 9/9 вакансий, ~132 сек, ~1.4 ₽ с кэшем. Стоимость ~0.10-0.15 ₽/письмо
-
----
-
-## 📊 P4: МУЛЬТИ-LLM КАЛИБРОВКА
-
-**Калибровочный набор:** 19 вакансий (из 20 в `calibration_set.json`,
-одна без `description`).
-- 10 positive (pending/applied, conf 0.79–0.95)
-- 10 negative (rejected, conf 0.44–0.68)
-- Покрытие: FP/FN из P4 (Rostic's, Non-IT), отраслевые (18a), роль ≠ функция (23), AI/LLM
-
-**Ручная разметка** (`docs/datasets/manual_labels_20261017.txt`, в git):
-- 8 approve/reject: 2 approve, 6 reject
-- 3 borderline: `138558358` (ГИП), `138385238` (Chief of Staff), `137526115` (iFCM Product Manager)
-
-**Матрица:** `docs/datasets/calibration_full_matrix.csv` (не в git).
-
-### 🎯 Ключевые открытия
-
-1. **Обогащённый промпт = F1 1.00.** DS-rules (web) остаётся эталоном (8/8).
-   С обогащением v3.2 и qwen **достигли 1.00** (до обогащения: v3.2 0.67, qwen 0.40).
-   Это доказало: качество web-сессии DS воспроизводится через API **при правильном
-   system prompt**.
-
-2. **Кэш DeepSeek через `session_id`** = 89% экономии (0.72 → 0.08 ₽/вызов).
-   Промпт 10K+ токенов кэшируется полностью. TTL кэша ~10 минут.
-
-3. **2-Pro системный аутсайдер** — 47.4% согласия с 3-Pro/v3.2/qwen (хуже случайного).
-   Ошибся на **обоих** кейсах P4 (Rostic's FP, Non-IT FN).
-
-4. **qwen3.7-flash** — самый дешёвый (~6₽/1M) с F1=1.00, но медленный
-   (67-85 сек/вызов).
-
-5. **Два кейса из P4 (для сверки):**
-   - `138357711` Rostic's — ручной reject. 2-Pro/3-Pro/3-Ultra ошиблись (approve).
-   - `138528225` RUTUBE Non-IT — ручной borderline. 2-Pro/2-Max ошиблись (reject).
-
-### Что НЕ закрыто в P4
-
-- **Расширение калибровки с 8 до 20-30** (для устойчивости F1) — не начато
-- **Borderline-класс** (категория `approve | borderline | reject` в
-  `SuitabilityResult`) — отложено
-- **«Сумма равных» в отсечках** (когда требование дублируется в жёсткой и
-  мягкой формулировке — оценивать по жёсткой) — отложено
-
----
-
-## 📋 ПРИОРИТЕТЫ (на 18 октября 2026)
-
-### Фаза A: выбор резюме для отклика
-- ✅ A1 (best_resume в модели + TG + JSON) — сделано (`2e4fecb`)
-- ✅ A3 (apply с best_resume через dropdown hh.ru) — сделано (`a3a5087`)
-- ⏸ **A2 — search по всем 4 резюме** (сейчас только RP) — **не начато**
-
-### Фаза B: сопроводительные письма через AITUNNEL DeepSeek
-- ✅ B1 (`generate_cover_letter` с `system_override`/`session_id`) — сделано (`202deb6`)
-- ✅ B2 (скрипт `generate_cover_letters.py` + дайджест) — сделано (`f5c2551`)
-- ⏸ **B3 — интеграция в `main.py`** (автоматическая генерация писем в pipeline) — **следующая задача**
-- ⏸ B4 — включить `ENABLE_COVER_LETTER_GENERATION=true` в `.env`
-
-### Фаза C: расширение калибровки
-- ⏸ Расширение с 8 до 20-30 вакансий (для устойчивости F1)
-
-### Фаза D: production
-- ⏸ Заменить `LLM_MODEL=GigaChat-2-Pro` на `deepseek-v3.2` в pipeline оценки
-- ⏸ Smoke на реальной вакансии → check → коммит
-
-### P5 — мелочи (по остаточному принципу)
-- Вилки «от 200 000» (`salary_to IS NULL`) уходят в `skipped_low_salary` — баг
-- `envidence` → `evidence` постпроцессинг
-- SQL `datetime('now','-10 minutes')` — ISO-формат
+ROP — Руководитель отдела поддержки
 
-**Порядок:** дайджест → **B3 (интеграция сопроводов)** → B4 → A2 → C → D → P5.
+Search: пока только по RP. A2 (все 4) — не начато.
 
----
+⚙️ АВТОСТАРТ СЕРВИСОВ
+4 systemd-user-юнита в ~/.config/systemd/user/:
 
-## 🎬 СЛЕДУЮЩИЙ ШАГ — разбор ретеста v3.1 → выбор модели → production D
+Юнит	Что запускает	Порт/дисплей
+hh-xvfb.service	Xvfb :99 (1280x800x24) + ExecStartPre чистит lock	:99
+hh-fluxbox.service	fluxbox WM	:99
+hh-x11vnc.service	x11vnc (VNC-сервер)	:5900
+hh-gpt2giga.service	gpt2giga --port 8090 --mode DEV	:8090
+Проверка:
 
-**Что сделано:**
-- ✅ B3 — сопроводы в pipeline (27 pending с новыми письмами)
-- ✅ Дайджест v3.1 — 2 правила (зарплата + длина)
-- 🟡 Ретест v3.1 — результат получен (12 вакансий × 2 модели = 24 письма), ждёт разбора
+bash
+systemctl --user --no-pager -l status hh-xvfb hh-fluxbox hh-x11vnc hh-gpt2giga | grep -E "●|Active:"
+ss -tlnp 2>/dev/null | grep -E ":(8090|5900)\b"
+VNC-вход на hh.ru (если сессия протухла): TightVNC Viewer → 192.168.100.10:5900 (пароль пустой) → Chromium → войти на hh.ru → вернуться в SSH, ENTER.
 
-**Сейчас:**
-1. Разобрать результат ретеста v3.1 (qwen + gc3ultra на 12 вакансиях) в экспертной сессии
-2. По результатам: выбрать модель для production
+Агента запускаем вручную:
 
-**Критерии выбора:**
-- **qwen3.7-flash** — если ретест подтвердил 4.17+, сходство с v4.1 не критично
-- **GigaChat-3-Ultra** — если после v3.1 стал 4.6+ (зарплата/длина не повторяются),
-  и freemium (0₽) важнее, чем +0.3 балла qwen
-- **Если обе плохи** (<4.0) — проблема в дайджесте, а не в модели
+bash
+cd ~/hh-ai-agent && source venv/bin/activate
+unset HH_ACCESS_TOKEN HH_REFRESH_TOKEN HH_TOKEN_EXPIRES_AT
+export DISPLAY=:99
+python3 main.py
+Остановка — Ctrl+C в его вкладке или pkill -INT -f "python3 main.py".
 
-**После выбора — production D:**
-- Заменить `LLM_MODEL=GigaChat-2-Pro` на выбранную модель
-- Для assess (оценка) — `deepseek-v3.2` через AITUNNEL с `ds_context_digest.md`
-- Прокинуть в `process_vacancy` через те же 5 функций
-- Smoke на живой вакансии → проверка → коммит
-
-**Следующая большая задача — A2** (search по 4 резюме) + **C** (расширение калибровки до 20-30).
-
----
-
-## 📁 КЛЮЧЕВЫЕ ФАЙЛЫ
+🧠 МОДЕЛИ — D1 и D2 сделаны (22 окт)
+Сопроводы (D1, коммит 7522911):
 
-| Файл | Что там |
-|---|---|
-| `profile.yaml` (в корне!) | AI/LLM-якоря, технологии, стоп-факторы. В `.gitignore` |
-| `config/resumes.yaml` | 4 ID резюме (RP active, RSP/RPO/ROP ждут) |
-| `.env` | `LLM_PROVIDER`, `LLM_MODEL=GigaChat-2-Pro`, `ENABLE_COVER_LETTER_GENERATION=false`, `MAX_PAGES_PER_QUERY=0`, `MAX_PENDING_RECOMMENDATIONS=60`, `TG_REPORT_PER_PAGE=true`, `AITUNNEL_API_KEY`, `AITUNNEL_BASE_URL` |
-| `ai_analyzer.py` | Промпт (правила 1–24 + 18a), `_request` (с `model_override`, `system_override`, `session_id`), `_safe_letter`, `_COVER_LETTER_SYSTEM` |
-| `llm/managed.py` | `_generate` — retry, dirtyjson, blacklist, `prompt_version` |
-| `llm/types.py` | `LLMRequest` (`vacancy_id`, `session_id`) |
-| `llm/providers/openai_compatible.py` | Адаптер AITUNNEL (`session_id` в payload) |
-| `database.py` | Миграции, `applied_jobs`, `seen_vacancies`, `evaluations`, `latest_llm_request_meta` |
-| `main.py` | `process_vacancy`, `run_search_cycle`, `record_evaluation`, `check_llm` |
-| `hh_client.py` | `_is_junior_title`, `search_by_resume` (пагинация до конца), `_get_resume_id`, `submit_application` (выбор резюме через dropdown) |
-| `tg_bot.py` | Bootstrap, notify_cycle_done, show_pending, reply, `📄 Стр. N/M` |
-| `cover_letter.py` | `format_portfolio_footer`, `cover_letter_validation_error` (лимит 1500) |
-| `scripts/backup_db.sh` | Бэкап `agent.db` с ротацией (10 последних) |
-| `scripts/evaluate_models.py` | Прогон моделей (`--provider gigachat\|aitunnel`, `--max-tokens`, `--system-from-file`, `--session-id`) |
-| `scripts/compare_all.py` | Матрица N×M, consensus, pairwise, CSV |
-| `scripts/compare_vs_manual.py` | Precision/recall/F1 против ручной разметки |
-| `scripts/generate_cover_letters.py` | Генерация сопроводов через AITUNNEL с дайджестом |
-| `docs/datasets/ds_context_digest.md` | Дайджест для оценки (~33 КБ) |
-| `docs/datasets/ds_cover_letter_digest.md` | Дайджест для сопроводов (~27 КБ) |
-| `docs/datasets/calibration_set.json` | 20 калибровочных (в git) |
-| `docs/datasets/manual_labels_20261017.txt` | Ручная разметка (в git) |
+COVER_LETTER_MODEL=qwen3.7-flash (было deepseek-v3.2)
 
----
+Через AITUNNEL + system_override=ds_cover_letter_digest.md (~32K символов)
 
-## 🛠️ КОМАНДЫ
+session_id="cover-letter-main" для кэша
 
-**Запуск агента:**
+В main.py: _cl_kwargs["model_override"] = settings.llm.cover_letter_model
 
-    cd ~/hh-ai-agent && source venv/bin/activate && export DISPLAY=:99
-    python3 main.py
+Оценка (D2, коммит 8c4618a):
 
-Остановка — `Ctrl+C` в его вкладке.
+ASSESS_MODEL=deepseek-v3.2
 
-**Бэкап БД:**
+Через AITUNNEL + system_override=ds_context_digest.md (~34K символов)
 
-    cd ~/hh-ai-agent && ./scripts/backup_db.sh <метка>
-
-**Healthcheck LLM:**
+session_id="context-main" для кэша
 
-    cd ~/hh-ai-agent && source venv/bin/activate
-    timeout 60 python3 main.py --check-llm
+В main.py: глобалы _context_analyzer, _context_digest, _context_session_id; assess() использует их с model_override/session_id/system_override
 
-**Прогон моделей для калибровки:**
+_load_context_digest() + _create_cover_letter_analyzer() (переиспользуется как фабрика)
 
-    cd ~/hh-ai-agent
-    set -a; source .env; set +a
-    python3 scripts/evaluate_models.py --calibration --provider aitunnel \
-      --models deepseek-v3.2,qwen3.7-flash --max-tokens 16000 --delay 3
+GigaChat-2-Pro: legacy, в LLM_MODEL остался, но production не использует.
 
-**Сравнение с ручной разметкой:**
+Результаты калибровки сопроводов:
 
-    python3 scripts/compare_vs_manual.py
+Модель	v3.1	v3.2	v3.3.1 (прогноз)
+qwen3.7-flash	4.58	4.58	—
+GigaChat-3-Ultra	4.08	4.50	—
+qwen выбран production-моделью сопроводов. gc3ultra подтянулся после v3.2 — можно как fallback, но qwen стабильнее (не галлюцинирует).
 
-**Генерация сопроводов (скрипт):**
+Стоимость DeepSeek v3.2: ~36₽/1M input, ~54₽/1M output. input_tokens ~14–19K на вакансию (с дайджестом). Кэш через session_id работает, но код не сохраняет cached_tokens — только prompt_tokens/completion_tokens.
 
-    cd ~/hh-ai-agent
-    set -a; source .env; set +a
-    python3 scripts/generate_cover_letters.py --calibration --show
+AITUNNEL возвращает cost_rub в usage — можно мониторить точную стоимость. Пока не парсим.
 
-**Push в форк:** `cd ~/hh-ai-agent && git push`
+✅ ЧТО СДЕЛАНО В AI5/AI6
+До 22.10 (17 коммитов):
 
-**Pull из upstream (cherry-pick):** `git fetch upstream && git cherry-pick <commit>`
+Observability: description, vacancy_id, prompt_version, raw_response в llm_requests
 
-**Состояние БД:**
+Правила 18a/23/24 в промпте оценки
 
-    sqlite3 -header -column agent.db "SELECT status, COUNT(*) FROM vacancies GROUP BY status;"
-    sqlite3 -header -column agent.db "SELECT model, COUNT(*) FROM evaluations WHERE is_calibration=1 GROUP BY model;"
-    sqlite3 agent.db "SELECT COUNT(*) FROM seen_vacancies;"
+Пагинация до конца + seen_vacancies + evaluations
 
-**Тесты (по одному, не все сразу):**
+P4 калибровка (19 вакансий, 11 моделей)
 
-    python3 -m pytest tests/test_config.py -q --no-header
-    python3 -m pytest tests/test_hh_client.py -q --no-header
-    python3 -m pytest tests/test_approval.py -q --no-header
-    python3 -m pytest tests/ -q --no-header   # полный, baseline 27 fail
+A1/A3 (best_resume + dropdown hh.ru)
 
----
+B1/B2 (сопроводы через AITUNNEL)
 
-## ⚠️ ВАЖНЫЕ НЮАНСЫ
+B3 (сопроводы в pipeline, 27 pending)
 
-- **CloakBrowser free v146, 1 concurrent session.** Не жать две кнопки одновременно.
-- **`AUTO_APPLY_ENABLED=false`** — только ручное approval через TG.
-- **`ENABLE_COVER_LETTER_GENERATION=false`** — сопроводы пока генерим отдельным скриптом (B2), в pipeline не встроено (B3 — следующий шаг).
-- **`MAX_APPLICATIONS_PER_DAY=50`**, но на первый отклик — по одной карточке.
-- **AITUNNEL баланс:** 1079.24 ₽ (18.10.2026). DeepSeek v3.2 ~0.52₽/вызов, qwen ~0.14₽/вызов с кэшем.
-- **`--max-tokens 16000`** для DeepSeek/Qwen (reasoning-модели).
-- **`session_id`** должен быть **одинаковым** для всей серии вызовов (иначе кэш не активируется).
-- **Кэш TTL ~10 минут.** Если пауза >10 мин — первый вызов холодный (полная цена).
-- **Правило «Песец»** — `mascots/tracker.py`, шлёт картинки песца в TG. К LLM отношения не имеет.
-- `.gitignore`: `.env`, `config/`, `agent.db`, `*.bak-*`, `docs/datasets/*.txt`, `docs/datasets/compare.py`, `docs/datasets/export_raw.py`, `docs/datasets/calibration_*.csv`
-- Xvfb **1280x800x24** (фактическое).
-- **При записи больших файлов** — маленькими блоками `cat >>` по 60-80 строк.
-- **В названиях задач — писать полностью**, не «B1», а «генерация сопроводительных писем через AITUNNEL».
+Тест 5 моделей сопроводов (60 писем) + ретест 2 моделей (24 письма)
 
----
+v3.2 digest (правила конкретики и «только реальный опыт»)
 
-## 🔗 ССЫЛКИ
+v3.3.1 digest (грейд/масштаб, P&L, betting, годы, дубли, Example 8)
 
-- Upstream: https://github.com/fikstt2/hh-ai-agent
-- Форк: https://github.com/asverinov/hh-ai-agent
-- Ветка: https://github.com/asverinov/hh-ai-agent/tree/my-local-work
-- hh.ru резюме РП: https://hh.ru/resume/bc7c9e1aff0fe6b4ae0039ed1f614361526447
-- Telegram: @asverinov_bot
-- AITUNNEL: https://aitunnel.ru
+За 22.10 (коммиты 7522911–8c4618a):
 
----
+7522911 D1: cover_letter_model=qwen3.7-flash
 
-## 📄 РЕЗЮМЕ (для P4 / multi-resume)
+021f6bf fix(tg_bot): кнопка «Показать рекомендованные» (не проходила фильтр регистрации)
 
-4 резюме приложены к диалогу AI5:
-- **РП** (Руководитель проектов) — основное, поиск идёт по нему
-- РСП (Сервис-менеджер)
-- РПО (Руководитель проектного офиса)
-- РОП (Руководитель отдела поддержки)
+7cd3041 docs: ds_cover_letter_digest.md v3.3.1
 
-`SuitabilityResult.best_resume` уже выбирает одно из 4 (RP/RSP/RPO/ROP).
-Задел: сравнение вакансий со всеми резюме одновременно + search по всем 4.
+8c4618a D2 + closed-vacancy + OAuth endpoint:
 
----
+config.py: assess_model + парсинг
 
-## 📌 БЫСТРЫЙ СТАРТ В НОВОЙ СЕССИИ
+main.py: _load_context_digest + _context_analyzer глобалы + assess через override
 
-1. Скажи «дайджест» — получишь `cat docs/AI5-digest.md`.
-2. Проверь, что агент остановлен: `pgrep -af "python3 main.py"`.
-3. Проверь сервисы: `ss -tlnp | grep -E ":(8090|5900)"`.
-4. Проверь БД: `sqlite3 -header -column agent.db "SELECT status, COUNT(*) FROM vacancies GROUP BY status;"`.
-5. Проверь AITUNNEL баланс: `curl` через API.
-6. **Следующая задача:** B3 — интеграция генерации сопроводительных писем через AITUNNEL в `main.py`.
+main.py: VACANCY_REMOVED/VACANCY_HIDDEN → EXPIRED (без circuit breaker)
 
-**Текущее состояние (18 окт, 17:35):**
-- 139 rejected_by_llm, 30 pending, 14 applied, 19 filter, 18 skipped
-- 201 evaluations (189 калибровочных)
-- 1568 seen_vacancies
-- AITUNNEL баланс: 1079.24 ₽
-- Тесты: 27 fail, 344 passed (baseline, 0 регрессов)
-- 12 коммитов с начала AI6, все в `origin/my-local-work`
+hh_client.py: PageState.VACANCY_HIDDEN + classify_page ловит «Вам недоступна»
 
----
+hh_client.py: endpoint api.hh.ru/oauth/token → hh.ru/oauth/token
 
-*Создан в AI6, коммит `f5c2551`. При обновлении — старую версию сохраняем
-как `docs/AI5-digest.md.bak-<timestamp>`.*
+database.py: ALLOWED_TRANSITIONS[DISCOVERED] += EXPIRED
+
+scripts/evaluate_discovered.py — оценка discovered без CloakBrowser
+
+docs/HH-OAUTH-RECOVERY.md — процедура восстановления токена (169 строк)
+
+Не закоммичено (на момент обновления): profile.yaml (в .gitignore) — восстановлены ЦИК России, Министерство обороны, Джет (без запрета), «участвовал в подготовке к аудитам», «организовал производство ПАК», Память народа + МО.
+
+📊 P4: МУЛЬТИ-LLM КАЛИБРОВКА (краткая ссылка)
+Калибровка 19 вакансий (10 positive / 10 negative):
+
+deepseek-v3.2 (AITUNNEL + обогащённый промпт): F1=1.00
+
+qwen3.7-flash (AITUNNEL + обогащённый промпт): F1=1.00
+
+GigaChat-2-Pro: F1=0.50 — аутсайдер, отказ от production
+
+GigaChat-3-Ultra: F1=0.67
+
+Кэш DeepSeek через session_id: 89% экономии
+
+Подробности — в старых коммитах d86ee70, 07d0062, 28e412e. В этой сессии P4 не пересматривался.
+
+🔑 HH OAUTH — КРАТКАЯ СПРАВКА
+Полная процедура восстановления токена — в docs/HH-OAUTH-RECOVERY.md (169 строк).
+
+Суть: access_token живёт 14 дней, refresh_token ~60 дней. hh.ru закрыл applicant-API для новых приложений, поэтому используем firehh (публичный Android-client_id).
+
+Refresh-логика в коде: только endpoint исправлен (api.hh.ru → hh.ru). Полный refresh flow не wired: client_id/client_secret не передаются, новая пара не сохраняется в .env, нет проактивного триггера. Каждые 14 дней — ручной firehh auth login (по инструкции).
+
+Backlog по refresh: см. раздел «Что НЕ закрыто».
+
+📋 ПРИОРИТЕТЫ НА 22 ОКТЯБРЯ
+Фаза «Переоценка 247 rejected_by_llm»
+✅ Сброс 247 → discovered, чистка seen_vacancies
+
+🟡 evaluate_discovered.py работает в фоне (PID 76166, ~162 из 169 к 06:00 22.10)
+
+⏸ 45 discovered без description — не оценены, ждут решения
+
+Фаза «D2 — оценка через DeepSeek»
+✅ Код (коммит 8c4618a)
+
+✅ Smoke на 1 вакансии
+
+✅ Запущен прогон 169 discovered
+
+⏸ Валидация на калибровке (19 эталонных) — не сделана
+
+Фаза «Closed-vacancy handling»
+✅ VACANCY_HIDDEN + VACANCY_REMOVED → EXPIRED (без circuit breaker)
+
+⏸ Тест на живой закрытой вакансии — не сделан
+
+Фаза «OAuth refresh»
+✅ Endpoint fix (8c4618a)
+
+⏸ Полный refresh flow (client_id/secret + сохранение в .env) — не wired
+
+📝 Процедура описана в docs/HH-OAUTH-RECOVERY.md
+
+Backlog (не срочно)
+Circuit breaker не сбрасывает paused=True — агент зависает на 6 часов
+
+Комментарий к «Пропустить» в TG + логирование причин фильтра
+
+Проверка rejected_by_filter (junior-маркеры, «интерн» в «интернет»)
+
+Кэш DeepSeek — не сохраняем cached_tokens/cost_rub
+
+apply_failed (12) — растёт, причина не выяснена
+
+A2 (search по 4 резюме)
+
+Расширение калибровки с 19 до 30
+
+🎬 СЛЕДУЮЩИЙ ШАГ
+Утро 22.10:
+
+Проверить evaluate_discovered.py — завершился ли (pgrep -af evaluate_discovered.py)
+
+Посмотреть === DONE === в /tmp/eval-169-*.log
+
+Запустить main.py → bootstrap отправит новые pending в TG
+
+Разгрести карточки в TG (старые + новые)
+
+Затем:
+
+Валидация D2 на калибровке (19 эталонных, F1=1.00 — ожидание)
+
+Тест closed-vacancy на живой закрытой вакансии
+
+45 без desc: либо read_vacancy через CloakBrowser, либо выкинуть
+
+Circuit breaker fix (сброс paused после успешного цикла)
+
+Refresh flow (client_id/secret + сохранение .env)
+
+📁 КЛЮЧЕВЫЕ ФАЙЛЫ
+Файл	Что там
+profile.yaml (в корне!)	AI/LLM-якоря, технологии, стоп-факторы. В .gitignore
+config/resumes.yaml	4 ID резюме (RP active, RSP/RPO/ROP ждут)
+.env	LLM_PROVIDER, LLM_MODEL, ASSESS_MODEL=deepseek-v3.2, COVER_LETTER_MODEL=qwen3.7-flash, AITUNNEL_*, ENABLE_COVER_LETTER_GENERATION=true, MAX_PAGES_PER_QUERY=0, MAX_PENDING_RECOMMENDATIONS=60, TG_REPORT_PER_PAGE=true
+ai_analyzer.py	Промпт (правила 1–24 + 18a), _request (с model_override, system_override, session_id), assess(), generate_cover_letter()
+llm/managed.py	_generate — retry, dirtyjson, blacklist, prompt_version
+llm/types.py	LLMRequest (vacancy_id, session_id)
+llm/providers/openai_compatible.py	Адаптер AITUNNEL (session_id в payload)
+database.py	Миграции, applied_jobs, seen_vacancies, evaluations, ALLOWED_TRANSITIONS
+main.py	process_vacancy, run_search_cycle, _load_context_digest, _context_analyzer, record_evaluation, check_llm, run()
+hh_client.py	_is_junior_title, search_by_resume (пагинация), _get_resume_id, submit_application, read_vacancy, classify_page (VACANCY_HIDDEN)
+tg_bot.py	Bootstrap, notify_cycle_done, show_pending (карточки), reply, 📄 Стр. N/M
+cover_letter.py	format_portfolio_footer, cover_letter_validation_error (лимит 1500)
+scripts/backup_db.sh	Бэкап agent.db с ротацией (10 последних)
+scripts/evaluate_models.py	Прогон моделей (--provider gigachat|aitunnel, --max-tokens, --system-from-file, --session-id)
+scripts/compare_all.py	Матрица N×M, consensus, pairwise, CSV
+scripts/compare_vs_manual.py	Precision/recall/F1 против ручной разметки
+scripts/generate_cover_letters.py	Генерация сопроводов через AITUNNEL с дайджестом
+scripts/evaluate_discovered.py	Оценка discovered без CloakBrowser (D2 pipeline)
+scripts/test_cover_letter_models.py	Сравнение моделей на сопроводах
+docs/HH-OAUTH-RECOVERY.md	Процедура восстановления OAuth-токена
+docs/datasets/ds_context_digest.md	Дайджест для оценки (~34K символов)
+docs/datasets/ds_cover_letter_digest.md	Дайджест для сопроводов (~32K символов) v3.3.1
+docs/datasets/calibration_set.json	20 калибровочных (в git)
+docs/datasets/manual_labels_20261017.txt	Ручная разметка (в git)
+🛠️ КОМАНДЫ
+Запуск агента:
+
+bash
+cd ~/hh-ai-agent && source venv/bin/activate
+unset HH_ACCESS_TOKEN HH_REFRESH_TOKEN HH_TOKEN_EXPIRES_AT
+export DISPLAY=:99
+python3 main.py
+Бэкап БД:
+
+bash
+cd ~/hh-ai-agent && ./scripts/backup_db.sh <метка>
+Healthcheck LLM:
+
+bash
+cd ~/hh-ai-agent && source venv/bin/activate
+timeout 60 python3 main.py --check-llm
+Оценка discovered без CloakBrowser:
+
+bash
+cd ~/hh-ai-agent && source venv/bin/activate
+python3 scripts/evaluate_discovered.py --dry-run
+nohup python3 scripts/evaluate_discovered.py > /tmp/eval-$(date +%H%M).log 2>&1 &
+Прогон моделей для калибровки:
+
+bash
+cd ~/hh-ai-agent
+set -a; source .env; set +a
+python3 scripts/evaluate_models.py --calibration --provider aitunnel \
+  --models deepseek-v3.2,qwen3.7-flash --max-tokens 16000 --delay 3
+Сравнение с ручной разметкой:
+
+bash
+cd ~/hh-ai-agent && python3 scripts/compare_vs_manual.py
+Генерация сопроводов (скрипт):
+
+bash
+cd ~/hh-ai-agent
+set -a; source .env; set +a
+python3 scripts/generate_cover_letters.py --calibration --show
+Push в форк: cd ~/hh-ai-agent && git push
+Pull из upstream (cherry-pick): git fetch upstream && git cherry-pick <commit>
+
+Состояние БД:
+
+bash
+sqlite3 -header -column agent.db "SELECT status, COUNT(*) FROM vacancies GROUP BY status;"
+sqlite3 -header -column agent.db "SELECT model, COUNT(*) FROM evaluations GROUP BY model;"
+sqlite3 agent.db "SELECT COUNT(*) FROM seen_vacancies;"
+Тесты (по одному, не все сразу):
+
+bash
+python3 -m pytest tests/test_config.py -q --no-header
+python3 -m pytest tests/test_hh_client.py -q --no-header
+python3 -m pytest tests/test_approval.py -q --no-header
+python3 -m pytest tests/ -q --no-header   # полный, baseline 27 fail
+⚠️ ВАЖНЫЕ НЮАНСЫ
+os.environ перезаписывает .env в config.py:values.update(os.environ). Если делал source .env — в этом shell main.py получит старые значения. Правило: агент запускать в чистом shell, или unset HH_* перед запуском.
+
+CloakBrowser free v146, 1 concurrent session. Не жать две кнопки одновременно. Если запущен main.py, read_vacancy/submit_application не работают из другого процесса.
+
+AUTO_APPLY_ENABLED=false — только ручное approval через TG.
+
+ENABLE_COVER_LETTER_GENERATION=true — сопроводы через AITUNNEL qwen.
+
+MAX_APPLICATIONS_PER_DAY=50, но на первый отклик — по одной карточке.
+
+AITUNNEL баланс: ~1027 ₽ (22.10.2026). DeepSeek v3.2 ~0.6-0.7₽/вызов, qwen ~0.3-0.4₽/вызов с кэшем.
+
+--max-tokens 16000 для DeepSeek/Qwen (reasoning-модели).
+
+session_id должен быть одинаковым для всей серии вызовов (иначе кэш не активируется).
+
+Кэш TTL ~10 минут. Если пауза >10 мин — первый вызов холодный.
+
+circuit breaker зависает: после paused=True не сбрасывается. Агент висит на 6+ часов. Патч: сбрасывать control.paused = False после успешного search_cycle_finished со state=completed.
+
+VACANCY_HIDDEN — «Вам недоступна эта вакансия» (скрыл работодатель). VACANCY_REMOVED — «Вакансия в архиве». Оба → EXPIRED, не PAGE_STRUCTURE_CHANGED, не circuit breaker.
+
+evaluate_discovered.py — не использует main.py:process_vacancy, только assess() + request_approval. Не шлёт карточки в TG — они появятся после следующего запуска main.py (bootstrap).
+
+Правило «Песец» — mascots/tracker.py, шлёт картинки песца в TG. К LLM отношения не имеет.
+
+.gitignore: .env, config/, agent.db, *.bak-*, docs/datasets/*.txt, docs/datasets/compare.py, docs/datasets/export_raw.py, docs/datasets/calibration_*.csv
+
+Xvfb 1280x800x24 (фактическое).
+
+При записи больших файлов — маленькими блоками cat >> по 60-80 строк.
+
+В названиях задач — писать полностью.
+
+🔗 ССЫЛКИ
+Upstream: https://github.com/fikstt2/hh-ai-agent
+
+Форк: https://github.com/asverinov/hh-ai-agent
+
+Ветка: https://github.com/asverinov/hh-ai-agent/tree/my-local-work
+
+hh.ru резюме РП: https://hh.ru/resume/bc7c9e1aff0fe6b4ae0039ed1f614361526447
+
+Telegram: @asverinov_bot
+
+AITUNNEL: https://aitunnel.ru
+
+firehh (npm): @bagasek/firehh
+
+📄 РЕЗЮМЕ (для P4 / multi-resume)
+4 резюме:
+
+РП (Руководитель проектов) — основное, поиск идёт по нему
+
+РСП (Сервис-менеджер)
+
+РПО (Руководитель проектного офиса)
+
+РОП (Руководитель отдела поддержки)
+
+SuitabilityResult.best_resume уже выбирает одно из 4 (RP/RSP/RPO/ROP).
+Задел: сравнение вакансий со всеми резюме + search по 4 (A2).
+
+📌 БЫСТРЫЙ СТАРТ В НОВОЙ СЕССИИ
+Скажи «дайджест» — получишь cat docs/AI5-digest.md.
+
+Проверь, что агент остановлен: pgrep -af "python3 main.py".
+
+Проверь сервисы: ss -tlnp | grep -E ":(8090|5900)".
+
+Проверь БД: sqlite3 -header -column agent.db "SELECT status, COUNT(*) FROM vacancies GROUP BY status;".
+
+Проверь AITUNNEL баланс: curl через API.
+
+Следующая задача: дождаться evaluate_discovered.py, запустить main.py, разгрести TG. Затем — closed-vacancy тест, circuit breaker fix, refresh flow.
+
+Состояние на 22.10.2026, 01:00:
+
+discovered: 162 (169 оценятся к 06:00) + 45 без desc
+
+pending_approval: 20
+
+rejected_by_llm: 21
+
+applied: 25, skipped: 31, expired: 3, rejected_by_filter: 30
+
+analysis_failed: 5, apply_failed: 12
+
+seen_vacancies: 1517
+
+AITUNNEL баланс: ~1027 ₽
+
+DeepSeek вызовов: 96, ~61 ₽
+
+HEAD: 8c4618a
+
+Создан в AI6, коммит 8c4618a. При обновлении — старую версию сохраняем как docs/AI5-digest.md.bak-<timestamp>.
+
