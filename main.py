@@ -215,6 +215,27 @@ def _load_cover_letter_digest() -> str:
         return ""
 
 
+def _load_context_digest() -> str:
+    """Загружает дайджест оценки из docs/datasets/ds_context_digest.md."""
+    path = Path("docs/datasets/ds_context_digest.md")
+    if not path.exists():
+        logger.warning("context_digest_not_found path=%s", path)
+        return ""
+    try:
+        return path.read_text(encoding="utf-8")
+    except Exception as exc:
+        logger.warning("context_digest_read_failed error=%s", exc)
+        return ""
+
+
+# Глобальное состояние для assess через AITUNNEL + ds_context_digest.
+# Устанавливается в run(), читается в process_vacancy. Однопоточный агент —
+# гонок нет; если появится параллельность — переделать на kwargs.
+_context_analyzer: "VacancyAnalyzer | None" = None
+_context_digest: str = ""
+_context_session_id: str = "context-main"
+
+
 def _create_cover_letter_analyzer(
     settings: Settings, database: Database,
 ) -> VacancyAnalyzer | None:
@@ -303,6 +324,23 @@ async def process_vacancy(
         logger.info("vacancy_discovered job_id=%s", summary.id)
     else:
         logger.info("vacancy_resumed job_id=%s", summary.id)
+    if details.state in {PageState.VACANCY_REMOVED, PageState.VACANCY_HIDDEN}:
+        error_reason = (
+            "archived_by_employer"
+            if details.state is PageState.VACANCY_REMOVED
+            else "hidden_by_employer"
+        )
+        database.transition(
+            summary.id,
+            VacancyStatus.DISCOVERED,
+            VacancyStatus.EXPIRED,
+            error_text=error_reason,
+        )
+        logger.info(
+            "vacancy_expired job_id=%s reason=%s", summary.id, error_reason,
+        )
+        return VacancyProcessResult("expired", error_reason, details.state)
+
     if details.state is not PageState.VACANCY_LOADED:
         error = details.error or details.state.value
         database.transition(
@@ -371,9 +409,17 @@ async def process_vacancy(
         )
 
     try:
-        suitability = await analyzer.assess(
-            summary.title, details.description, vacancy_id=summary.id
-        )
+        if _context_analyzer is not None and _context_digest:
+            suitability = await _context_analyzer.assess(
+                summary.title, details.description, vacancy_id=summary.id,
+                model_override=settings.llm.assess_model,
+                session_id=_context_session_id,
+                system_override=_context_digest,
+            )
+        else:
+            suitability = await analyzer.assess(
+                summary.title, details.description, vacancy_id=summary.id
+            )
     except AnalysisError as exc:
         database.mark_analysis_failed(
             summary.id,
@@ -1067,6 +1113,23 @@ async def run(settings: Settings) -> None:
                     logger.warning(
                         "cover_letter_analyzer_fallback_to_main_analyzer"
                     )
+
+        # Отдельный analyzer для оценки через AITUNNEL + ds_context_digest
+        global _context_analyzer, _context_digest, _context_session_id
+        _context_digest = _load_context_digest()
+        if _context_digest:
+            _context_analyzer = _create_cover_letter_analyzer(
+                settings, database
+            )
+            if _context_analyzer is not None:
+                logger.info(
+                    "context_analyzer_ready digest_len=%s assess_model=%s",
+                    len(_context_digest), settings.llm.assess_model,
+                )
+            else:
+                logger.warning(
+                    "context_analyzer_fallback_to_main_analyzer"
+                )
 
         # Bootstrap: сообщить о старте + отправить все pending_approval в TG
         # Делаем ДО синхронизации applied_jobs (она занимает ~2.5 минуты)

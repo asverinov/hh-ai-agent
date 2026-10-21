@@ -102,6 +102,7 @@ class LLMSettings:
     aitunnel_api_key: str = ""
     aitunnel_base_url: str = "https://api.aitunnel.ru/v1"
     cover_letter_model: str = "qwen3.7-flash"
+    assess_model: str = "deepseek-v3.2"
 
 
 @dataclass(frozen=True)
@@ -595,6 +596,9 @@ def load_settings(
             ).strip(),
             cover_letter_model=values.get(
                 "COVER_LETTER_MODEL", "qwen3.7-flash"
+            ).strip(),
+            assess_model=values.get(
+                "ASSESS_MODEL", "deepseek-v3.2"
             ).strip(),
         ),
         app_mode=app_mode,
