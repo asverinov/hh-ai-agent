@@ -109,6 +109,7 @@ ALLOWED_TRANSITIONS = {
         VacancyStatus.ANALYSIS_FAILED,
         VacancyStatus.PENDING_APPROVAL,
         VacancyStatus.APPLY_FAILED,
+        VacancyStatus.EXPIRED,
     },
     VacancyStatus.PENDING_APPROVAL: {
         VacancyStatus.APPROVED,

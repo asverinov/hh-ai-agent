@@ -60,6 +60,7 @@ class PageState(str, Enum):
     CAPTCHA_DETECTED = "captcha_detected"
     ACCESS_DENIED = "access_denied"
     VACANCY_REMOVED = "vacancy_removed"
+    VACANCY_HIDDEN = "vacancy_hidden"
     PAGE_STRUCTURE_CHANGED = "page_structure_changed"
     NETWORK_ERROR = "network_error"
 
@@ -151,6 +152,12 @@ async def classify_page(page: Any) -> PageState:
                     '[data-qa="access-denied"]',
                     '[data-qa="error-page"]',
                     'h1:has-text("Доступ ограничен")',
+                ),
+            ),
+            (
+                PageState.VACANCY_HIDDEN,
+                (
+                    ':has-text("Вам недоступна эта вакансия")',
                 ),
             ),
             (
@@ -315,7 +322,7 @@ class HHClient:
         session = await self._get_http_session()
         try:
             async with session.post(
-                "https://api.hh.ru/oauth/token",
+                "https://hh.ru/oauth/token",
                 data={
                     "grant_type": "refresh_token",
                     "refresh_token": self._refresh_token,
