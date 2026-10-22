@@ -19,7 +19,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from config import load_settings
-from database import Database
+from database import Database, VacancyStatus
 from main import (
     _create_cover_letter_analyzer,
     _load_context_digest,
@@ -82,7 +82,7 @@ async def evaluate_one(db, analyzer, settings, context_digest, cover_digest, row
 
     if not suitability.suitable:
         db.transition(
-            vid, "discovered", "rejected_by_llm",
+            vid, VacancyStatus.DISCOVERED, VacancyStatus.REJECTED_BY_LLM,
             llm_decision=False, llm_reason=suitability.verdict,
             confidence=suitability.confidence,
             evaluation_json=eval_json, error_text="",
@@ -100,7 +100,7 @@ async def evaluate_one(db, analyzer, settings, context_digest, cover_digest, row
         )
     except Exception as exc:
         db.transition(
-            vid, "discovered", "apply_failed",
+            vid, VacancyStatus.DISCOVERED, VacancyStatus.APPLY_FAILED,
             llm_decision=True, llm_reason=suitability.verdict,
             confidence=suitability.confidence,
             evaluation_json=eval_json,
@@ -110,7 +110,7 @@ async def evaluate_one(db, analyzer, settings, context_digest, cover_digest, row
 
     if not letter.strip():
         db.transition(
-            vid, "discovered", "apply_failed",
+            vid, VacancyStatus.DISCOVERED, VacancyStatus.APPLY_FAILED,
             llm_decision=True, llm_reason=suitability.verdict,
             confidence=suitability.confidence,
             evaluation_json=eval_json, error_text="cover_letter_empty",
@@ -181,7 +181,7 @@ async def main():
     for i, row in enumerate(rows, 1):
         vid = row[0]
         current = db.get(vid)
-        if current is None or current.status != "discovered":
+        if current is None or current.status != VacancyStatus.DISCOVERED.value:
             print(f"  [{i}/{total}] {vid} SKIP (status={current.status if current else '?'})")
             continue
 
