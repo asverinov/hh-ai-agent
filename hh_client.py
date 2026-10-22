@@ -391,10 +391,17 @@ class HHClient:
     async def search_vacancies_by_resume(
         self,
         page_callback: "Callable[[dict[str, Any]], Awaitable[None]] | None" = None,
+        resume_code: str | None = None,
     ) -> VacancySearchResult:
-        resume = self._read_active_resume()
-        if resume is None:
-            return VacancySearchResult([], 0, 0, "no_active_resume")
+        if resume_code:
+            rid = self._get_resume_id(resume_code)
+            if not rid:
+                return VacancySearchResult([], 0, 0, f"resume_not_found:{resume_code}")
+            resume = {"code": resume_code, "id": rid}
+        else:
+            resume = self._read_active_resume()
+            if resume is None:
+                return VacancySearchResult([], 0, 0, "no_active_resume")
         if not await self._refresh_token_if_needed():
             return VacancySearchResult([], 0, 0, "auth_error")
 

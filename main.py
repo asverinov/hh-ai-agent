@@ -717,59 +717,64 @@ async def run_search_cycle(
         elif settings.hh_use_similar_vacancies:
             # Один вызов — не крутим цикл по всем search_queries впустую
             if not control.paused:
-                logger.info("search_by_resume_started resume=RP")
-                async def _page_cb(info: dict) -> None:
-                    if not getattr(settings, "tg_report_per_page", False):
-                        return
-                    page = info["page"] + 1
-                    total = info.get("total_pages") or "?"
-                    try:
-                        await telegram.notify(
-                            f"📄 Стр. {page}/{total}\n"
-                            f"Из API: {info['items']}\n"
-                            f"Новых: {info['new']}\n"
-                            f"Дубликатов: {info['duplicates']}\n"
-                            f"В очередь на LLM: {info['new']} "
-                            f"(всего {info['results_total']})"
-                        )
-                    except Exception as exc:
-                        logger.warning("page_cb_notify_failed error=%s", exc)
-
-                search = await hh_client.search_vacancies_by_resume(
-                    page_callback=_page_cb
-                )
-                stats.query_count += 1
-                stats.found_results += search.found_results
-                stats.new_vacancies += sum(
-                    not summary.previously_sent for summary in search.summaries
-                )
-                stats.duplicates += search.duplicates
-                logger.info(
-                    "search_by_resume_finished found=%s new=%s duplicates=%s",
-                    search.found_results,
-                    sum(not s.previously_sent for s in search.summaries),
-                    search.duplicates,
-                )
-                if search.error_reason:
-                    stats.record_error(search.error_reason)
-                    control.consecutive_search_errors += 1
-                else:
-                    control.consecutive_search_errors = 0
-                if (
-                    control.consecutive_search_errors
-                    >= settings.circuit_breaker_page_errors
-                ):
-                    circuit_reason = "search_errors"
-                    state = "paused_by_circuit_breaker"
-                    control.paused = True
-                    control.circuit_reason = circuit_reason
-                for summary in search.summaries:
-                    if control.paused or (
-                        auto_apply_batch_limit is not None
-                        and stats.auto_applications >= auto_apply_batch_limit
-                    ):
+                for code in ["RP", "RSP", "ROP", "RPO"]:
+                    if control.paused:
                         break
-                    await process(summary)
+                    logger.info("search_by_resume_started resume=%s", code)
+                    async def _page_cb(info: dict) -> None:
+                        if not getattr(settings, "tg_report_per_page", False):
+                            return
+                        page = info["page"] + 1
+                        total = info.get("total_pages") or "?"
+                        try:
+                            await telegram.notify(
+                                f"📄 Стр. {page}/{total}\n"
+                                f"Из API: {info['items']}\n"
+                                f"Новых: {info['new']}\n"
+                                f"Дубликатов: {info['duplicates']}\n"
+                                f"В очередь на LLM: {info['new']} "
+                                f"(всего {info['results_total']})"
+                            )
+                        except Exception as exc:
+                            logger.warning("page_cb_notify_failed error=%s", exc)
+
+                    search = await hh_client.search_vacancies_by_resume(
+                        page_callback=_page_cb,
+                        resume_code=code,
+                    )
+                    stats.query_count += 1
+                    stats.found_results += search.found_results
+                    stats.new_vacancies += sum(
+                        not summary.previously_sent for summary in search.summaries
+                    )
+                    stats.duplicates += search.duplicates
+                    logger.info(
+                        "search_by_resume_finished resume=%s found=%s new=%s duplicates=%s",
+                        code,
+                        search.found_results,
+                        sum(not s.previously_sent for s in search.summaries),
+                        search.duplicates,
+                    )
+                    if search.error_reason:
+                        stats.record_error(search.error_reason)
+                        control.consecutive_search_errors += 1
+                    else:
+                        control.consecutive_search_errors = 0
+                    if (
+                        control.consecutive_search_errors
+                        >= settings.circuit_breaker_page_errors
+                    ):
+                        circuit_reason = "search_errors"
+                        state = "paused_by_circuit_breaker"
+                        control.paused = True
+                        control.circuit_reason = circuit_reason
+                    for summary in search.summaries:
+                        if control.paused or (
+                            auto_apply_batch_limit is not None
+                            and stats.auto_applications >= auto_apply_batch_limit
+                        ):
+                            break
+                        await process(summary)
         else:
             for query in settings.profile.hh.search_queries:
                 if control.paused or (
