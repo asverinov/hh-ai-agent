@@ -450,6 +450,7 @@ async def process_vacancy(
         ],
         "confidence": suitability.confidence,
         "best_resume": suitability.best_resume,
+        "best_resume_reason": suitability.best_resume_reason,
     }
     evaluation_json = json.dumps(evaluation_data, ensure_ascii=False)
 

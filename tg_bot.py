@@ -264,6 +264,9 @@ class TelegramService:
         if action == "show_pending":
             await self._show_pending_callback(callback)
             return
+        if action == "change_resume":
+            await self._change_resume_callback(callback, job_id)
+            return
         if not separator or action not in {"apply", "skip", "edit"} or not job_id:
             await self._answer_callback(
                 callback, "Некорректное действие.", show_alert=True
@@ -745,6 +748,9 @@ class TelegramService:
                         InlineKeyboardButton(
                             text="✏️ Изменить письмо", callback_data=f"edit:{vacancy.id}"
                         ),
+                        InlineKeyboardButton(
+                            text="🔄 Сменить резюме", callback_data=f"change_resume:{vacancy.id}"
+                        ),
                     ],
                 ]
             )
@@ -809,6 +815,14 @@ class TelegramService:
             return ""
 
     @classmethod
+    def _resume_reason(cls, vacancy: Vacancy) -> str:
+        try:
+            import json
+            data = json.loads(vacancy.evaluation_json or "{}")
+            return data.get("best_resume_reason", "")
+        except Exception:
+            return ""
+
     def _rich_card(cls, vacancy: Vacancy) -> InputRichMessage:
         company_blocks = [
             InputRichBlockParagraph(
@@ -860,6 +874,14 @@ class TelegramService:
                     )]
                     if cls._evaluation_text(vacancy) else []
                 ),
+                *(
+                    [InputRichBlockDetails(
+                        summary="Обоснование резюме",
+                        blocks=[InputRichBlockParagraph(text=cls._resume_reason(vacancy))],
+                        is_open=False,
+                    )]
+                    if cls._resume_reason(vacancy) else []
+                ),
                 InputRichBlockDetails(
                     summary="Сопроводительное письмо",
                     blocks=[InputRichBlockParagraph(text=vacancy.cover_letter)],
@@ -898,6 +920,33 @@ class TelegramService:
             )
             + f"<b>Сопроводительное письмо</b>\n{html.escape(vacancy.cover_letter)}"
         )
+
+    async def _change_resume_callback(self, callback: CallbackQuery, job_id: str) -> None:
+        import json
+        vacancy = self.database.get(job_id)
+        if not vacancy:
+            await self._answer_callback(callback, "Вакансия не найдена", show_alert=True)
+            return
+        try:
+            data = json.loads(vacancy.evaluation_json or "{}")
+        except Exception:
+            data = {}
+        current = vacancy.manual_resume_override or data.get("best_resume") or "RP"
+        res = ["RP", "RSP", "RPO", "ROP"]
+        next_res = res[(res.index(current) + 1) % len(res)] if current in res else "RP"
+        data["best_resume"] = next_res
+        self.database.update_resume_override(job_id, next_res)
+        self.database.update_evaluation_json(job_id, json.dumps(data, ensure_ascii=False))
+        await self._answer_callback(callback, f"Резюме изменено на {next_res}")
+        try:
+            if callback.message:
+                updated = self.database.get(job_id)
+                await callback.message.edit_text(
+                    text=f"Резюме изменено на {next_res}",
+                    reply_markup=callback.message.reply_markup,
+                )
+        except Exception:
+            pass
 
     async def _show_pending_callback(self, callback: CallbackQuery) -> None:
         pending = sorted(

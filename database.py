@@ -54,6 +54,7 @@ class Vacancy:
     analysis_retry_count: int
     analysis_next_retry_at: str | None
     evaluation_json: str = ""
+    manual_resume_override: str = ""
     salary_from: int | None = None
     salary_to: int | None = None
     salary_currency: str = ""
@@ -203,6 +204,12 @@ class Database:
                 "CREATE INDEX IF NOT EXISTS evaluations_calibration_idx "
                 "ON evaluations(is_calibration)"
             )
+            try:
+                connection.execute(
+                    "ALTER TABLE vacancies ADD COLUMN manual_resume_override TEXT NOT NULL DEFAULT ''"
+                )
+            except sqlite3.OperationalError:
+                pass  # колонка уже существует
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS chat_messages (
@@ -515,6 +522,7 @@ class Database:
             applied_at=row["applied_at"],
             approver_id=row["approver_id"],
             error_text=row["error_text"],
+            manual_resume_override=(row["manual_resume_override"] if "manual_resume_override" in row.keys() else "") or "",
             analysis_retry_count=row["analysis_retry_count"],
             analysis_next_retry_at=row["analysis_next_retry_at"],
             evaluation_json=(
@@ -807,6 +815,22 @@ class Database:
             cursor = connection.execute(
                 f"UPDATE vacancies SET {', '.join(assignments)} WHERE id = ? AND status IN ({placeholders})",
                 values,
+            )
+            return cursor.rowcount == 1
+
+    def update_resume_override(self, job_id: str, resume_code: str) -> bool:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "UPDATE vacancies SET manual_resume_override = ? WHERE id = ?",
+                (resume_code, job_id),
+            )
+            return cursor.rowcount == 1
+
+    def update_evaluation_json(self, job_id: str, evaluation_json: str) -> bool:
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "UPDATE vacancies SET evaluation_json = ? WHERE id = ?",
+                (evaluation_json, job_id),
             )
             return cursor.rowcount == 1
 

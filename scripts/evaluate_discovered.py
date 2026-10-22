@@ -62,6 +62,7 @@ async def evaluate_one(db, analyzer, settings, context_digest, cover_digest, row
         ],
         "confidence": suitability.confidence,
         "best_resume": suitability.best_resume,
+        "best_resume_reason": suitability.best_resume_reason,
     }
     eval_json = json.dumps(eval_data, ensure_ascii=False)
 

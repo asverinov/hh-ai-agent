@@ -163,13 +163,15 @@ class SuitabilityResult(BaseModel):
     verdict: str = Field(min_length=1, max_length=1500)
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     best_resume: str | None = Field(default=None, max_length=10)
+    best_resume_reason: str | None = Field(default=None)
+    best_resume_reason: str | None = Field(default=None)
 
     @model_validator(mode="before")
     @classmethod
     def _normalize(cls, data: object) -> object:
         if not isinstance(data, dict):
             return data
-        root_keys = {"suitable", "requirements", "verdict", "confidence", "best_resume"}
+        root_keys = {"suitable", "requirements", "verdict", "confidence", "best_resume", "best_resume_reason"}
         req_keys = {"level", "label", "text", "match", "evidence"}
         data = dict(data)
         for k in list(data.keys()):
@@ -373,7 +375,9 @@ class VacancyAnalyzer:
                 '{"level": 1..7, "label": "название уровня", "text": "требование", '
                 '"match": 0.0..1.0, "evidence": "цитата из профиля"}'
                 '], '
-                '"verdict": "краткий вердикт"}\n'
+                '"verdict": "краткий вердикт", '
+                '"best_resume": "RP/RSP/RPO/ROP", '
+                '"best_resume_reason": "обоснование выбора резюме (до 800 символов)"}\n'
                 "ПРАВИЛА:\n"
                 "1) requirements — ОДИН плоский список. Каждый элемент — ОДНО требование.\n"
                 "2) level=1 — отсекающие требования: опыт от N лет, высшее образование, "
@@ -392,6 +396,14 @@ class VacancyAnalyzer:
                 "   0.4 — слабое: косвенная связь, логически выводимо из большого опыта;\n"
                 "   0.2 — очень слабое: дальний смежный опыт;\n"
                 "   0.0 — нет соответствия: ни прямого, ни смежного опыта.\n"
+                "5.1) В additional_information профиля описаны 4 типа резюме: RP, RSP, RPO, ROP. "
+                "Сравни требования вакансии с этими 4 ролями. Выбери ту, которая подходит лучше всего. "
+                "Например: инциденты/SLA/ITIL → RSP; методология/PMO → RPO; ПАК/железо → ROP; общие ИТ-проекты → RP. "
+                "В поле best_resume_reason напиши абзац (до 800 символов), почему выбрано именно оно.\n"
+                "5.1) В additional_information профиля описаны 4 типа резюме: RP, RSP, RPO, ROP. "
+                "Сравни требования вакансии с этими 4 ролями. Выбери ту, которая подходит лучше всего. "
+                "Например: инциденты/SLA/ITIL → RSP; методология/PMO → RPO; ПАК/железо → ROP; общие ИТ-проекты → RP. "
+                "В поле best_resume_reason напиши абзац (до 800 символов), почему выбрано именно оно.\n"
                 "6) evidence — МАКСИМУМ 40 символов, 2-5 ключевых слов из профиля. "
                 "Если match ≥ 0.4, но прямой цитаты нет — приведи ближайший релевантный факт "
                 "(например, «20+ лет в ИТ»). Пустое evidence — только при match ≤ 0.2.\n"
