@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import logging
+import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import datetime
@@ -67,6 +69,8 @@ class ApprovalService:
         self.database = database
         self.sender = sender
         self.now_factory = now_factory or (lambda: datetime.now().astimezone())
+        self._apply_lock = asyncio.Lock()
+        self._last_apply_time = 0.0
 
     async def approve_and_apply(
         self, job_id: str, telegram_user_id: int
@@ -111,7 +115,19 @@ class ApprovalService:
             return ApprovalResult(False, "Approval is missing, expired, or already used")
         logger.info("approval_received job_id=%s", job_id)
         permission = ApplicationPermission(job_id, permit, telegram_user_id)
-        sent = await self.sender.submit_application(permission)
+        
+        async with self._apply_lock:
+            now = time.monotonic()
+            elapsed = now - self._last_apply_time
+            min_interval = 300.0  # 5 минут
+            if elapsed < min_interval:
+                wait = min_interval - elapsed
+                logger.info("rate_limit_wait seconds=%.1f", wait)
+                await asyncio.sleep(wait)
+                
+            sent = await self.sender.submit_application(permission)
+            self._last_apply_time = time.monotonic()
+            
         return ApprovalResult(sent, "Application sent" if sent else "Application failed")
 
     async def auto_apply(self, job_id: str) -> ApprovalResult:
