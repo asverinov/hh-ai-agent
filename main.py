@@ -717,18 +717,20 @@ async def run_search_cycle(
         elif settings.hh_use_similar_vacancies:
             # Один вызов — не крутим цикл по всем search_queries впустую
             if not control.paused:
+                resume_titles = {"RP": "РП", "RSP": "РСП", "ROP": "РОП", "RPO": "РПО"}
                 for code in ["RP", "RSP", "ROP", "RPO"]:
                     if control.paused:
                         break
                     logger.info("search_by_resume_started resume=%s", code)
-                    async def _page_cb(info: dict) -> None:
+                    async def _page_cb(info: dict, _code=code) -> None:
                         if not getattr(settings, "tg_report_per_page", False):
                             return
                         page = info["page"] + 1
                         total = info.get("total_pages") or "?"
+                        title = resume_titles.get(_code, _code)
                         try:
                             await telegram.notify(
-                                f"📄 Стр. {page}/{total}\n"
+                                f"📄 {title}: Стр. {page}/{total}\n"
                                 f"Из API: {info['items']}\n"
                                 f"Новых: {info['new']}\n"
                                 f"Дубликатов: {info['duplicates']}\n"
