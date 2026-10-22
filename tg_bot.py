@@ -85,6 +85,8 @@ class TelegramService:
         self._captcha_future: asyncio.Future[str | None] | None = None
         self._edit_job_id: str | None = None
         self._edit_future: asyncio.Future[str | None] | None = None
+        self._skip_reason_future: asyncio.Future[str | None] | None = None
+        self._skip_job_id: str | None = None
         self._mistral_key_input: MistralKeyInputSession | None = None
         self.latest_release: ReleaseInfo | None = None
         self._notified_release_tag: str | None = None
@@ -246,6 +248,19 @@ class TelegramService:
             self._mistral_key_input = None
             await message.answer("Current Mistral key input cancelled.")
             return
+        # /start и /status — с главным меню (кнопки)
+        if name in {"start", "status"}:
+            text = self.command(name, message.from_user.id)
+            try:
+                await self.bot.send_message(
+                    chat_id=self.settings.tg_user_id,
+                    text=text,
+                    reply_markup=self._main_menu_keyboard(),
+                    disable_web_page_preview=True,
+                )
+            except Exception as exc:
+                logger.warning("menu_send_failed error=%s", exc)
+            return
         await message.answer(self.command(name, message.from_user.id))
 
     async def _callback_handler(self, callback: CallbackQuery) -> None:
@@ -261,8 +276,29 @@ class TelegramService:
         if action == "mk":
             await self._mistral_key_callback(callback, (callback.data or "").split(":"))
             return
+        if action == "continue_analysis":
+            self.control.paused = False
+            self.control.circuit_reason = ""
+            self.control.next_run_at = None
+            self.control.wake_event.set()
+            await callback.answer("Запускаю следующую пачку…")
+            return
         if action == "show_pending":
             await self._show_pending_callback(callback)
+            return
+        if action == "skip_reason":
+            _, reason_code, job_id = callback.data.split(":")
+            if reason_code == "other":
+                self._skip_job_id = job_id
+                self._skip_reason_future = asyncio.get_event_loop().create_future()
+                await callback.message.edit_text("Напишите причину пропуска (или /cancel):")
+                await callback.answer()
+            else:
+                reasons = {"grade": "Не тот грейд", "salary": "Зарплата", "specific": "Специфика"}
+                reason_text = reasons.get(reason_code, "Другое")
+                self.approval_service.skip(job_id, callback.from_user.id, reason_text)
+                await callback.message.edit_text(f"Пропущено: {reason_text}")
+                await callback.answer()
             return
         if action == "change_resume":
             await self._change_resume_callback(callback, job_id)
@@ -382,8 +418,16 @@ class TelegramService:
                 self._edit_job_id = None
                 self._edit_future = None
         else:
-            # skip выполняется быстро — можно отвечать обычным способом.
-            result = self.approval_service.skip(job_id, callback.from_user.id)
+            await callback.answer()
+            reason_kb = InlineKeyboardMarkup(inline_keyboard=[
+                [InlineKeyboardButton(text="Не тот грейд", callback_data=f"skip_reason:grade:{job_id}")],
+                [InlineKeyboardButton(text="Зарплата", callback_data=f"skip_reason:salary:{job_id}")],
+                [InlineKeyboardButton(text="Специфика", callback_data=f"skip_reason:specific:{job_id}")],
+                [InlineKeyboardButton(text="Другое (написать)", callback_data=f"skip_reason:other:{job_id}")],
+            ])
+            if callback.message:
+                await callback.message.edit_reply_markup(reply_markup=reason_kb)
+            return
             await self._answer_callback(
                 callback, result.message, show_alert=not result.ok
             )
@@ -625,6 +669,15 @@ class TelegramService:
             return
         if self._edit_future and not self._edit_future.done() and message.text:
             self._edit_future.set_result(message.text.strip())
+            return
+        if self._skip_reason_future and not self._skip_reason_future.done() and message.text:
+            reason = message.text.strip()
+            if self._skip_job_id:
+                self.approval_service.skip(self._skip_job_id, message.from_user.id, reason)
+                await message.answer(f"Пропущено: {reason}")
+            self._skip_reason_future.set_result(reason)
+            self._skip_reason_future = None
+            self._skip_job_id = None
             return
         key_session = self._mistral_key_input
         if key_session is None:
@@ -948,6 +1001,12 @@ class TelegramService:
         except Exception:
             pass
 
+    def _main_menu_keyboard(self) -> InlineKeyboardMarkup:
+        return InlineKeyboardMarkup(inline_keyboard=[
+            [InlineKeyboardButton(text="📋 Рекомендованные", callback_data="show_pending")],
+            [InlineKeyboardButton(text="▶️ Продолжить анализ", callback_data="continue_analysis")],
+        ])
+
     async def _show_pending_callback(self, callback: CallbackQuery) -> None:
         pending = sorted(
             self.database.pending(),
@@ -1038,12 +1097,20 @@ class TelegramService:
             parts.append(f"\u23F0 Следующая проверка: {next_run_at.strftime('%H:%M')}")
         text = "\n".join(parts)
         keyboard = InlineKeyboardMarkup(
-            inline_keyboard=[[
-                InlineKeyboardButton(
-                    text="\U0001F4CB Показать рекомендованные",
-                    callback_data="show_pending",
-                ),
-            ]]
+            inline_keyboard=[
+                [
+                    InlineKeyboardButton(
+                        text="\U0001F4CB Показать рекомендованные",
+                        callback_data="show_pending",
+                    ),
+                ],
+                [
+                    InlineKeyboardButton(
+                        text="▶️ Продолжить анализ",
+                        callback_data="continue_analysis",
+                    ),
+                ],
+            ]
         )
         try:
             await self.bot.send_message(

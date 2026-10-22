@@ -132,7 +132,7 @@ class Settings:
     log_path: Path
     check_interval_minutes: int
     max_applications_per_day: int
-    max_vacancies_per_query: int
+    max_assess_per_cycle: int
     max_pages_per_query: int
     max_pending_recommendations: int
     tg_report_per_page: bool
@@ -610,7 +610,7 @@ def load_settings(
         log_path=_path(values.get("LOG_PATH", "agent.log")),
         check_interval_minutes=positive_integer("CHECK_INTERVAL_MINUTES", "30"),
         max_applications_per_day=positive_integer("MAX_APPLICATIONS_PER_DAY", "5"),
-        max_vacancies_per_query=positive_integer("MAX_VACANCIES_PER_QUERY", "20"),
+        max_assess_per_cycle=positive_integer("MAX_ASSESS_PER_CYCLE", "20"),
         max_pages_per_query=non_negative_integer("MAX_PAGES_PER_QUERY", "2"),
         max_pending_recommendations=positive_integer("MAX_PENDING_RECOMMENDATIONS", "30"),
         tg_report_per_page=_bool_value(values.get("TG_REPORT_PER_PAGE", "false")),

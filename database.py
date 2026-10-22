@@ -55,6 +55,7 @@ class Vacancy:
     analysis_next_retry_at: str | None
     evaluation_json: str = ""
     manual_resume_override: str = ""
+    user_rejection_reason: str = ""
     salary_from: int | None = None
     salary_to: int | None = None
     salary_currency: str = ""
@@ -207,6 +208,12 @@ class Database:
             try:
                 connection.execute(
                     "ALTER TABLE vacancies ADD COLUMN manual_resume_override TEXT NOT NULL DEFAULT ''"
+                )
+            except sqlite3.OperationalError:
+                pass  # колонка уже существует
+            try:
+                connection.execute(
+                    "ALTER TABLE vacancies ADD COLUMN user_rejection_reason TEXT NOT NULL DEFAULT ''"
                 )
             except sqlite3.OperationalError:
                 pass  # колонка уже существует
@@ -523,6 +530,7 @@ class Database:
             approver_id=row["approver_id"],
             error_text=row["error_text"],
             manual_resume_override=(row["manual_resume_override"] if "manual_resume_override" in row.keys() else "") or "",
+            user_rejection_reason=(row["user_rejection_reason"] if "user_rejection_reason" in row.keys() else "") or "",
             analysis_retry_count=row["analysis_retry_count"],
             analysis_next_retry_at=row["analysis_next_retry_at"],
             evaluation_json=(
@@ -721,16 +729,18 @@ class Database:
                 connection.execute("SELECT * FROM vacancies WHERE id = ?", (job_id,)).fetchone()
             )
 
-    def unprocessed_discovered(self) -> list[Vacancy]:
+    def unprocessed_discovered(self, limit: int | None = None) -> list[Vacancy]:
         with self._connect() as connection:
-            rows = connection.execute(
-                """
-                SELECT * FROM vacancies
-                WHERE status = ? AND llm_decision IS NULL
-                ORDER BY discovered_at
-                """,
-                (VacancyStatus.DISCOVERED.value,),
-            ).fetchall()
+            sql = (
+                "SELECT * FROM vacancies "
+                "WHERE status = ? AND llm_decision IS NULL "
+                "ORDER BY discovered_at"
+            )
+            params: list = [VacancyStatus.DISCOVERED.value]
+            if limit and limit > 0:
+                sql += " LIMIT ?"
+                params.append(limit)
+            rows = connection.execute(sql, params).fetchall()
             return [self._vacancy(row) for row in rows]
 
     def mark_analysis_failed(
@@ -942,16 +952,17 @@ class Database:
             )
             return permit if cursor.rowcount == 1 else None
 
-    def skip(self, job_id: str, telegram_user_id: int, expected_user_id: int) -> bool:
+    def skip(self, job_id: str, telegram_user_id: int, expected_user_id: int, reason: str = "") -> bool:
         if telegram_user_id != expected_user_id:
             return False
         with self._connect() as connection:
             connection.execute("BEGIN IMMEDIATE")
             cursor = connection.execute(
-                "UPDATE vacancies SET status = ?, approver_id = ? WHERE id = ? AND status = ?",
+                "UPDATE vacancies SET status = ?, approver_id = ?, user_rejection_reason = ? WHERE id = ? AND status = ?",
                 (
                     VacancyStatus.SKIPPED.value,
                     telegram_user_id,
+                    reason,
                     job_id,
                     VacancyStatus.PENDING_APPROVAL.value,
                 ),

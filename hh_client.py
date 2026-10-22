@@ -493,9 +493,8 @@ class HHClient:
                         duplicates += 1
                         dup_on_page += 1
                         continue
-                    if new_count >= self.settings.max_vacancies_per_query:
-                        new_on_page += 1
-                        continue
+                    # max_vacancies_per_query больше не применяется на этапе сбора —
+                    # все новые вакансии идут в БД (discovered), разгребаются пачками.
                     results.append(
                         VacancySummary(
                             job_id, title, url, query_label,

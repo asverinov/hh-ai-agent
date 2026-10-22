@@ -637,6 +637,7 @@ async def run_search_cycle(
     cover_letter_analyzer: VacancyAnalyzer | None = None,
     cover_letter_digest: str = "",
     cover_letter_session_id: str = "cover-letter-main",
+    max_assess_per_cycle: int | None = None,
 ) -> SearchRun:
     if auto_apply_batch_limit is not None and auto_apply_batch_limit < 1:
         raise ValueError("auto_apply_batch_limit must be positive")
@@ -692,7 +693,7 @@ async def run_search_cycle(
         database.requeue_due_analysis_failures(
             now(), max_attempts=ANALYSIS_MAX_ATTEMPTS
         )
-        for vacancy in database.unprocessed_discovered():
+        for vacancy in database.unprocessed_discovered(limit=max_assess_per_cycle):
             if control.paused or (
                 auto_apply_batch_limit is not None
                 and stats.auto_applications >= auto_apply_batch_limit
@@ -988,6 +989,7 @@ async def agent_loop(
                         cover_letter_analyzer=cover_letter_analyzer,
                         cover_letter_digest=cover_letter_digest,
                         cover_letter_session_id=cover_letter_session_id,
+                        max_assess_per_cycle=settings.max_assess_per_cycle,
                     )
                     if control.paused:
                         control.next_run_at = None
@@ -1031,6 +1033,7 @@ async def agent_loop(
                 cover_letter_analyzer=cover_letter_analyzer,
                 cover_letter_digest=cover_letter_digest,
                 cover_letter_session_id=cover_letter_session_id,
+                max_assess_per_cycle=settings.max_assess_per_cycle,
             )
             control.next_run_at = (
                 None
