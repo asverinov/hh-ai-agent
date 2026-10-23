@@ -57,6 +57,12 @@ class FakeHHClient:
         self.search_calls = 0
         self.message_checks = 0
 
+    async def search_vacancies_by_resume(self, page_callback=None, resume_code=None):
+        self.search_calls += 1
+        if self.search_results:
+            return self.search_results.pop(0)
+        return VacancySearchResult([], 0, 0)
+
     async def read_vacancy(self, summary, captcha_solver=None):
         self.read_calls += 1
         return self.details
@@ -82,6 +88,9 @@ class SearchReached(Exception):
 
 class StopAtSearchHHClient(FakeHHClient):
     async def search_vacancies(self, *_args, **_kwargs):
+        raise SearchReached
+
+    async def search_vacancies_by_resume(self, *_args, **_kwargs):
         raise SearchReached
 
 
@@ -301,7 +310,7 @@ def test_dry_run_records_and_previews_without_pending_actions(tmp_path: Path) ->
     vacancy = database.get("job-1")
     assert vacancy.status is VacancyStatus.DISCOVERED
     assert vacancy.cover_letter == "Safe local-profile letter"
-    assert vacancy.fit_summary.startswith("Навыки: Python")
+    assert vacancy.fit_summary.startswith("Оценка:")
     assert vacancy.company_rating == 4.7
     assert telegram.previews == [("job-1", False)]
 
@@ -889,7 +898,7 @@ def test_retry_uses_valid_negative_decision_instead_of_technical_error(
             SuitabilityResult(
                 suitable=False,
                 confidence=0.2,
-                reason="Role mismatch",
+                verdict="Role mismatch",
             ),
         ]
     )

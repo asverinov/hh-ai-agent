@@ -883,18 +883,12 @@ class HHClient:
                     existing = self.database.get(job_id)
                     if existing is not None:
                         duplicates += 1
-                        if (
-                            existing.status is VacancyStatus.PENDING_APPROVAL
-                            and len(results) < self.settings.max_vacancies_per_query
-                        ):
+                        if existing.status is VacancyStatus.PENDING_APPROVAL:
                             results.append(
                                 VacancySummary(job_id, title, href, query, True)
                             )
                         continue
-                    if len(results) < self.settings.max_vacancies_per_query:
-                        results.append(VacancySummary(job_id, title, href, query))
-                if len(results) >= self.settings.max_vacancies_per_query:
-                    break
+                    results.append(VacancySummary(job_id, title, href, query))
                 await self._delay()
             return VacancySearchResult(results, found_results, duplicates)
         except Exception as exc:

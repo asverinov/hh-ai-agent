@@ -205,18 +205,6 @@ class Database:
                 "CREATE INDEX IF NOT EXISTS evaluations_calibration_idx "
                 "ON evaluations(is_calibration)"
             )
-            try:
-                connection.execute(
-                    "ALTER TABLE vacancies ADD COLUMN manual_resume_override TEXT NOT NULL DEFAULT ''"
-                )
-            except sqlite3.OperationalError:
-                pass  # колонка уже существует
-            try:
-                connection.execute(
-                    "ALTER TABLE vacancies ADD COLUMN user_rejection_reason TEXT NOT NULL DEFAULT ''"
-                )
-            except sqlite3.OperationalError:
-                pass  # колонка уже существует
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS chat_messages (
@@ -260,7 +248,10 @@ class Database:
                     error_text TEXT NOT NULL DEFAULT '',
                     analysis_retry_count INTEGER NOT NULL DEFAULT 0,
                     analysis_next_retry_at TEXT,
-                    evaluation_json TEXT NOT NULL DEFAULT ''
+                    evaluation_json TEXT NOT NULL DEFAULT '',
+                    description TEXT NOT NULL DEFAULT '',
+                    manual_resume_override TEXT NOT NULL DEFAULT '',
+                    user_rejection_reason TEXT NOT NULL DEFAULT ''
                 )
                 """
             )
@@ -410,7 +401,15 @@ class Database:
             return
         table_sql: str = row["sql"] or ""
         missing = [s.value for s in VacancyStatus if f"'{s.value}'" not in table_sql]
-        if not missing:
+        # Проверить наличие новых колонок (при пересборке они сохранятся)
+        required_cols = {
+            "manual_resume_override", "user_rejection_reason",
+            "evaluation_json", "description",
+            "salary_from", "salary_to", "salary_currency",
+        }
+        cols_present = {r[1] for r in connection.execute("PRAGMA table_info(vacancies)")}
+        missing_cols = required_cols - cols_present
+        if not missing and not missing_cols:
             return
         import logging as _logging
         _logging.getLogger(__name__).info(
@@ -450,21 +449,26 @@ class Database:
                 permit_hash TEXT,
                 error_text TEXT NOT NULL DEFAULT '',
                 analysis_retry_count INTEGER NOT NULL DEFAULT 0,
-                analysis_next_retry_at TEXT
+                analysis_next_retry_at TEXT,
+                evaluation_json TEXT NOT NULL DEFAULT '',
+                description TEXT NOT NULL DEFAULT '',
+                manual_resume_override TEXT NOT NULL DEFAULT '',
+                user_rejection_reason TEXT NOT NULL DEFAULT ''
             )
             """
         )
-        columns = (
-            "id, title, company, url, description_hash, search_query, "
-            "llm_decision, llm_reason, confidence, cover_letter, status, "
-            "discovered_at, approval_requested_at, approval_expires_at, "
-            "approved_at, applied_at, approver_id, permit_hash, error_text, "
-            "applying_at, submit_attempted_at, company_url, company_rating, "
-            "company_reviews_count, fit_summary, analysis_retry_count, analysis_next_retry_at"
-        )
-        connection.execute(
-            f"INSERT INTO vacancies ({columns}) SELECT {columns} FROM _vacancies_old"
-        )
+        # Динамическое пересечение: копируем только те колонки, которые есть
+        # в старой таблице (иначе INSERT упадёт с no such column на старых БД).
+        old_cols = {r[1] for r in connection.execute("PRAGMA table_info(_vacancies_old)")}
+        new_cols = {r[1] for r in connection.execute("PRAGMA table_info(vacancies)")}
+        cols_to_copy = sorted(old_cols & new_cols)
+        if cols_to_copy:
+            cols_str = ", ".join(cols_to_copy)
+            connection.execute(
+                f"INSERT INTO vacancies ({cols_str}) SELECT {cols_str} FROM _vacancies_old"
+            )
+        else:
+            raise RuntimeError("_migrate_status_check: нет общих колонок для копирования")
         connection.execute("DROP TABLE _vacancies_old")
         connection.execute(
             "CREATE INDEX IF NOT EXISTS vacancies_status_idx ON vacancies(status)"
