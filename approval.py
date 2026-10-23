@@ -179,10 +179,10 @@ class ApprovalService:
         sent = await self.sender.submit_application(permission)
         return ApprovalResult(sent, "Application sent" if sent else "Application failed")
 
-    def skip(self, job_id: str, telegram_user_id: int) -> ApprovalResult:
+    def skip(self, job_id: str, telegram_user_id: int, reason: str = "") -> ApprovalResult:
         if telegram_user_id != self.settings.tg_user_id:
             return ApprovalResult(False, "Action is not allowed")
         skipped = self.database.skip(
-            job_id, telegram_user_id, self.settings.tg_user_id
+            job_id, telegram_user_id, self.settings.tg_user_id, reason
         )
         return ApprovalResult(skipped, "Vacancy skipped" if skipped else "Vacancy is not pending")
