@@ -1152,16 +1152,22 @@ async def run(settings: Settings) -> None:
                 reverse=True,
             )
             await telegram.notify_bootstrap(stats, len(pending_vacancies))
-            for v in pending_vacancies:
-                try:
-                    await telegram.send_preview(v, include_actions=True)
-                except Exception as exc:
-                    logger.warning(
-                        "bootstrap_card_failed job_id=%s error=%s", v.id, exc,
-                    )
-            logger.info(
-                "bootstrap_done pending_cards=%s", len(pending_vacancies),
-            )
+            if len(pending_vacancies) <= 20:
+                for v in pending_vacancies:
+                    try:
+                        await telegram.send_preview(v, include_actions=True)
+                    except Exception as exc:
+                        logger.warning(
+                            "bootstrap_card_failed job_id=%s error=%s", v.id, exc,
+                        )
+                logger.info(
+                    "bootstrap_done pending_cards=%s", len(pending_vacancies),
+                )
+            else:
+                logger.info(
+                    "bootstrap_skip_cards pending=%s (use /start menu)",
+                    len(pending_vacancies),
+                )
         except Exception as exc:
             logger.warning("bootstrap_failed error=%s", exc)
 

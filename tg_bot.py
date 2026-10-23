@@ -1061,7 +1061,13 @@ class TelegramService:
             f"\u2022 \U0001F195 В очереди на анализ: {g('discovered')}\n\n"
         )
         if pending_count:
-            text += f"Отправляю {pending_count} карточек рекомендаций\u2026"
+            if pending_count > 20:
+                text += (
+                    f"\U0001F4CB Рекомендованных в очереди: {pending_count}. "
+                    f"Нажми «\U0001F4CB Рекомендованные» в меню (/start)."
+                )
+            else:
+                text += f"Отправляю {pending_count} карточек рекомендаций\u2026"
         else:
             text += "Рекомендаций в очереди нет."
         try:
