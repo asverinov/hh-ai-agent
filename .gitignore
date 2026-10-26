@@ -64,3 +64,4 @@ docs/datasets/calibration_reference_*.txt
 
 # Ручная разметка (ground truth) — в git, не артефакт
 !docs/datasets/manual_labels_*.txt
+data/resumes/

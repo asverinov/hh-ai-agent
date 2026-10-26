@@ -76,10 +76,29 @@ class CoverLetterProfile:
 
 
 @dataclass(frozen=True)
+class ResumeProfile:
+    title: str
+    summary: str
+    full_text: str
+    project_keys: tuple[str, ...]
+    tech_focus: tuple[str, ...]
+    domains: tuple[str, ...]
+    grade_markers: tuple[str, ...]
+    forbidden_facts: tuple[str, ...]
+
+@dataclass(frozen=True)
+class Stage0Rule:
+    keywords: tuple[str, ...]
+    candidates: tuple[str, ...]
+
+@dataclass(frozen=True)
 class Profile:
+
     candidate: CandidateProfile
     hh: HHProfile
     cover_letter: CoverLetterProfile
+    resumes: dict[str, ResumeProfile]
+    stage0_rules: tuple[Stage0Rule, ...]
 
 
 @dataclass(frozen=True)
@@ -415,6 +434,31 @@ def load_settings(
         errors.append("profile root must be a mapping")
         raw_profile = {}
 
+    # --- Parse resumes and stage0_rules ---
+    parsed_resumes = {}
+    raw_resumes = raw_profile.get("resumes", {})
+    if isinstance(raw_resumes, dict):
+        for r_code, r_data in raw_resumes.items():
+            if not isinstance(r_data, dict): continue
+            ft_path = Path(f"data/resumes/resume_{r_code}.txt")
+            ft = ft_path.read_text(encoding="utf-8") if ft_path.exists() else ""
+            parsed_resumes[r_code] = ResumeProfile(
+                title=str(r_data.get("title", "")), summary=str(r_data.get("summary", "")),
+                full_text=ft, project_keys=tuple(r_data.get("project_keys", [])),
+                tech_focus=tuple(r_data.get("tech_focus", [])), domains=tuple(r_data.get("domains", [])),
+                grade_markers=tuple(r_data.get("grade_markers", [])), forbidden_facts=tuple(r_data.get("forbidden_facts", [])),
+            )
+    parsed_rules = []
+    raw_rules = raw_profile.get("stage0_rules", [])
+    if isinstance(raw_rules, list):
+        for rule in raw_rules:
+            if not isinstance(rule, dict): continue
+            if "default" in rule:
+                parsed_rules.append(Stage0Rule(keywords=(), candidates=tuple(rule["default"])))
+            else:
+                parsed_rules.append(Stage0Rule(keywords=tuple(rule.get("keywords", [])), candidates=tuple(rule.get("candidates", []))))
+    # --------------------------------------
+
     def section(name: str) -> Mapping[str, object]:
         value = raw_profile.get(name, {})
         if not isinstance(value, dict):
@@ -641,7 +685,7 @@ def load_settings(
         circuit_breaker_page_errors=positive_integer(
             "CIRCUIT_BREAKER_PAGE_ERRORS", "3"
         ),
-        profile=Profile(candidate, hh, cover_letter),
+        profile=Profile(candidate, hh, cover_letter, parsed_resumes, tuple(parsed_rules)),
         hh_access_token=values.get("HH_ACCESS_TOKEN", "").strip(),
         hh_refresh_token=values.get("HH_REFRESH_TOKEN", "").strip(),
         hh_token_expires_at=_hh_token_expires_at,

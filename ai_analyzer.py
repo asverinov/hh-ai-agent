@@ -353,12 +353,64 @@ class VacancyAnalyzer:
             session_id=session_id,
         )
 
+    def select_resume_stage0(self, title: str, description: str) -> list[str]:
+        text = (title + " " + description).lower()
+        candidates = set()
+        for rule in self.settings.profile.stage0_rules:
+            if any(kw.lower() in text for kw in rule.keywords):
+                candidates.update(rule.candidates)
+        return list(candidates) if candidates else ["RP"]
+
+    async def select_resume_stage1(self, title: str, description: str, candidates: list[str]) -> tuple[str, str]:
+        import json as _json
+        summaries = {c: self.settings.profile.resumes[c].summary for c in candidates if c in self.settings.profile.resumes}
+        system = (
+            "Ты — HR-ассистент. Твоя ЕДИНСТВЕННАЯ задача: из списка резюме выбрать ОДНО, "
+            "которое лучше всего подходит под вакансию. НЕ оценивай требования, НЕ считай match, "
+            "НЕ возвращай поля suitable/requirements/verdict. Только выбор и краткое обоснование.\n"
+            "Ответ — строго валидный JSON из ДВУХ полей и ничего больше:\n"
+            '{"best_resume": "КОД", "rationale": "1-2 предложения почему именно этот код"}'
+        )
+        payload = {
+            "vacancy": {"title": title, "description": description[:2000]},
+            "candidates": summaries,
+            "allowed_codes": list(summaries.keys()),
+        }
+        req = self._request(
+            system_instructions=system,
+            payload=payload,
+            operation="stage1_select",
+            structured=False,
+            model_override=self.settings.llm.assess_model,
+            session_id="stage1-select",
+        )
+        try:
+            resp = await self.provider.generate_text(req)
+            raw = (resp.text or "").strip()
+            if raw.startswith("```"):
+                raw = raw.strip("`")
+                if raw.lower().startswith("json"):
+                    raw = raw[4:].lstrip()
+            start = raw.find("{")
+            end = raw.rfind("}")
+            if start == -1 or end == -1 or end <= start:
+                return candidates[0], f"Fallback (no json): {raw[:200]}"
+            data = _json.loads(raw[start:end+1])
+            code = str(data.get("best_resume", "")).strip().upper()
+            if code in summaries:
+                return code, str(data.get("rationale", "Stage 1 LLM"))[:500]
+            return candidates[0], f"Fallback (bad code={code!r}): {str(data)[:200]}"
+        except Exception as exc:
+            return candidates[0], f"Fallback (exc={type(exc).__name__}: {exc})"[:300]
+
     async def assess(
         self, vacancy_title: str, vacancy_description: str,
         *, vacancy_id: str | None = None,
         model_override: str | None = None,
         session_id: str | None = None,
         system_override: str | None = None,
+        best_resume: str | None = None,
+        resume_text: str | None = None,
     ) -> SuitabilityResult:
         request = self._request(
             system_instructions=(
@@ -373,7 +425,8 @@ class VacancyAnalyzer:
                 '{"level": 1..7, "label": "название уровня", "text": "требование", '
                 '"match": 0.0..1.0, "evidence": "цитата из профиля"}'
                 '], '
-                '"verdict": "краткий вердикт"}\n'
+                '"verdict": "краткий вердикт", '
+                '"best_resume": "RP/RSP/RPO/ROP"}\n'
                 "ПРАВИЛА:\n"
                 "1) requirements — ОДИН плоский список. Каждый элемент — ОДНО требование.\n"
                 "2) level=1 — отсекающие требования: опыт от N лет, высшее образование, "
@@ -579,6 +632,8 @@ class VacancyAnalyzer:
         model_override: str | None = None,
         system_override: str | None = None,
         session_id: str | None = None,
+        best_resume: str | None = None,
+        resume_text: str | None = None,
     ) -> str:
         cover = self.settings.profile.cover_letter
         greeting = "Добрый день!"
@@ -601,6 +656,8 @@ class VacancyAnalyzer:
 
         candidate = self._candidate()
         candidate.pop("additional_information", None)
+        if resume_text:
+            candidate = {"best_resume": best_resume, "resume_text": resume_text}
 
         if system_override:
             system_text = system_override

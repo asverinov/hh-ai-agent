@@ -216,8 +216,8 @@ def _load_cover_letter_digest() -> str:
 
 
 def _load_context_digest() -> str:
-    """Загружает дайджест оценки из docs/datasets/ds_context_digest.md."""
-    path = Path("docs/datasets/ds_context_digest.md")
+    """Загружает дайджест оценки из docs/datasets/ds_context_digest_v3.md."""
+    path = Path("docs/datasets/ds_context_digest_v3.md")
     if not path.exists():
         logger.warning("context_digest_not_found path=%s", path)
         return ""
@@ -408,6 +408,14 @@ async def process_vacancy(
             PageState.VACANCY_LOADED,
         )
 
+    candidates = analyzer.select_resume_stage0(summary.title, details.description)
+    if len(candidates) > 1:
+        best_resume, reason = await analyzer.select_resume_stage1(summary.title, details.description, candidates)
+    else:
+        best_resume = candidates[0]
+        reason = "Stage 0 heuristic"
+    resume_text = settings.profile.resumes.get(best_resume).full_text if best_resume in settings.profile.resumes else ""
+
     try:
         if _context_analyzer is not None and _context_digest:
             suitability = await _context_analyzer.assess(
@@ -415,10 +423,12 @@ async def process_vacancy(
                 model_override=settings.llm.assess_model,
                 session_id=_context_session_id,
                 system_override=_context_digest,
+                best_resume=best_resume, resume_text=resume_text,
             )
         else:
             suitability = await analyzer.assess(
-                summary.title, details.description, vacancy_id=summary.id
+                summary.title, details.description, vacancy_id=summary.id,
+                best_resume=best_resume, resume_text=resume_text,
             )
     except AnalysisError as exc:
         database.mark_analysis_failed(
@@ -449,7 +459,8 @@ async def process_vacancy(
             for r in suitability.requirements
         ],
         "confidence": suitability.confidence,
-        "best_resume": suitability.best_resume,
+        "best_resume": suitability.best_resume or best_resume,
+        "best_resume_reason": reason,
     }
     evaluation_json = json.dumps(evaluation_data, ensure_ascii=False)
 
@@ -541,7 +552,7 @@ async def process_vacancy(
             _cl_kwargs["session_id"] = cover_letter_session_id
         letter = await _cl_analyzer.generate_cover_letter(
             summary.title, details.description, company_name=details.company,
-            vacancy_id=summary.id, **_cl_kwargs,
+            vacancy_id=summary.id, best_resume=best_resume, resume_text=resume_text, **_cl_kwargs,
         )
         if not letter.strip():
             database.transition(
