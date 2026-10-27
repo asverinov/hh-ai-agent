@@ -170,6 +170,9 @@ class SuitabilityResult(BaseModel):
         if not isinstance(data, dict):
             return data
         root_keys = {"suitable", "requirements", "verdict", "confidence", "best_resume"}
+        # truncate длинный verdict (mimo иногда возвращает 2000+ символов)
+        if isinstance(data.get("verdict"), str) and len(data["verdict"]) > 1497:
+            data["verdict"] = data["verdict"][:1497] + "..."
         req_keys = {"level", "label", "text", "match", "evidence"}
         data = dict(data)
         for k in list(data.keys()):
@@ -731,7 +734,7 @@ class VacancyAnalyzer:
         return ""
 
     def _safe_letter(self, raw: str) -> tuple[str, bool]:
-        logger.warning("RAW_LETTER: %r", raw[:2000])
+        logger.debug("RAW_LETTER: %r", raw[:2000])
         letter = raw.strip()
         letter = letter.replace("ё", "е").replace("Ё", "Е")
         lowered = letter.lower()

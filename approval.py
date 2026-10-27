@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -41,6 +42,9 @@ class ApprovalGuard:
         self.settings = settings
         self.database = database
         self.now_factory = now_factory or (lambda: datetime.now().astimezone())
+        self._apply_cooldown_seconds = 300
+        self._last_apply_at = None
+        self._apply_lock = asyncio.Lock()
 
     def claim(self, permission: ApplicationPermission) -> ClaimResult:
         return self.database.claim_application(
@@ -99,16 +103,25 @@ class ApprovalService:
                     job_id, _err,
                 )
                 return ApprovalResult(False, f"Письмо не прошло валидацию: {_err}")
-        permit = self.database.approve(
-            job_id,
-            telegram_user_id,
-            self.settings.tg_user_id,
-            self.now_factory(),
-            self.settings.approval_ttl_minutes,
-        )
-        if permit is None:
-            logger.warning("application_blocked job_id=%s reason=approval_invalid", job_id)
-            return ApprovalResult(False, "Approval is missing, expired, or already used")
+        async with self._apply_lock:
+            now = self.now_factory()
+            if self._last_apply_at is not None:
+                elapsed = (now - self._last_apply_at).total_seconds()
+                if elapsed < self._apply_cooldown_seconds:
+                    wait = int(self._apply_cooldown_seconds - elapsed) + 1
+                    logger.warning("application_blocked job_id=%s reason=rate_limit wait=%ds", job_id, wait)
+                    return ApprovalResult(False, f"Подождите {wait} сек (защита hh.ru от спама)")
+            permit = self.database.approve(
+                job_id,
+                telegram_user_id,
+                self.settings.tg_user_id,
+                now,
+                self.settings.approval_ttl_minutes,
+            )
+            if permit is None:
+                logger.warning("application_blocked job_id=%s reason=approval_invalid", job_id)
+                return ApprovalResult(False, "Approval is missing, expired, or already used")
+            self._last_apply_at = now
         logger.info("approval_received job_id=%s", job_id)
         permission = ApplicationPermission(job_id, permit, telegram_user_id)
         sent = await self.sender.submit_application(permission)
