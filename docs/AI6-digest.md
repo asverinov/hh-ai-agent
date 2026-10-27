@@ -1,6 +1,7 @@
 # ДАЙДЖЕСТ СЕССИИ AI6 (26.10.2026)
 
-**Тема:** Каскадная архитектура Stage 0 → 1 → 2 + промпт сопроводов v4.1
+**Тема:** Каскадная архитектура Stage 0 → 1 → 2 + промпт сопроводов v4.2
+**Состояние на:** 27.10.2026, 17:45
 **Предыдущий дайджест:** `docs/AI5-digest.md` (от 22.10.2026)
 
 ---
@@ -87,6 +88,30 @@ TG-карточка → ручной apply
 | `docs/datasets/ds_cover_letter_digest.md` | v4.1 (32K) |
 
 ---
+
+## 5.1. ЧТО СДЕЛАНО 27.10.2026
+
+| Коммит | Что |
+|---|---|
+| `814987c` | fix(llm): `max_output_tokens=10000` для cover letter + диагностика `managed.py` (`finish_reason`, `raw_response` при ошибке) |
+| `8b54f37` | fix(hh): `classify_page` ловит архивные через `inner_text + re.search`, `count()>0` вместо `is_visible()` |
+| `a268385` | feat(regen): `regen_letter_only.py` (догенерация писем без assess) |
+| `95ebe8a` | feat(approval): rate-limit 300 сек + skip letter для reject |
+| `ec59c59` | feat(cascade): Stage 0→1→2 архитектура + v4.1 промпт |
+| `6f7a7ed` | docs: v4.2 промпт + обновления ARCHITECTURE |
+
+**Конфиги:**
+- `LLM_MAX_OUTPUT_TOKENS=16000` (mimo reasoning)
+- `LLM_TIMEOUT_SECONDS=180`
+- `max_output_tokens=10000` (cover letter, qwen)
+- Английские ключи в Stage 0: `project manager`, `delivery manager`, `program manager`, `engineering manager`
+
+**Данные (27.10.2026, 17:45):**
+- `pending_approval: 28` (все с `description` и `cover_letter`)
+- `rejected_by_llm: 237`
+- `expired: 6`
+- `discovered: 5`
+- `best_resume` distribution (по 28 pending): RP ~20, ROP ~4, RSP ~3, RPO ~1
 
 ## 6. СЛЕДУЮЩИЕ ШАГИ
 

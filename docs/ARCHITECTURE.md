@@ -86,6 +86,42 @@ approval.approve_and_apply -> hh_client.submit_application
 
 ---
 
+### LLM CONFIG (актуально на 27.10.2026)
+
+| Параметр | Значение | Зачем |
+|---|---|---|
+| `ASSESS_MODEL` | `mimo-v2.6-flash` | Stage 1 + Stage 2 (reasoning-модель) |
+| `COVER_LETTER_MODEL` | `qwen3.7-flash` | Письма |
+| `LLM_MAX_OUTPUT_TOKENS` | `16000` | mimo уходит в reasoning, 6000 не хватало |
+| `LLM_TIMEOUT_SECONDS` | `180` | Оценка + письмо, ~3 мин на сложные вакансии |
+| `max_output_tokens` (cover letter) | `10000` | qwen обрезался на 6000 → letter=0 |
+| `session_id` | `context-main` / `cover-letter-main` | Кэш AITUNNEL |
+
+**Диагностика `managed.py`:** при `empty/truncated` логируется `finish_reason` + `text_len`, `raw_response` сохраняется при ошибке.
+
+**mimo-v2.6-flash — reasoning-модель.** При `max_tokens=6000` reasoning съедал всё, `content=null` → `invalid_response`. При 16000 — хватает.
+
+### SCRIPTS (актуально на 27.10.2026)
+
+| Скрипт | Что делает |
+|---|---|
+| `fetch_descr_and_regen.py` | Дотягивает description для pending без него + каскад. Cleanup Chromium перед стартом. `VACANCY_REMOVED/HIDDEN/ACCESS_DENIED` → `expired`. |
+| `regen_letter_only.py` | Догенерация `cover_letter` для pending с `description!=''` и `cover_letter=''`. |
+| `regenerate_pending.py` | Полный прогон каскада для pending с description. |
+| `apply_cascade_patch.py` | Патч Stage 0→1→2 (историческое). |
+| `test_cascade.py`, `test_stage12_v2.py`, `test_stage3_cover.py` | Тесты каскада. |
+
+### RATE-LIMIT (актуально на 27.10.2026)
+
+- `approval.py`: `asyncio.Lock` + `_last_apply_at` в памяти процесса, cooldown 300 сек.
+- **Ограничение:** не переживает рестарт. **TODO:** заменить на `apply_worker.py` — очередь в БД + отдельный процесс.
+
+### CLASSIFY_PAGE (актуально на 27.10.2026)
+
+- `checks` использует `count() > 0` вместо `is_visible()` (последний бросал на невидимых).
+- Fallback через `page.locator("body").inner_text()` + `re.search` (игнорирует `\xa0`, разбивку по узлам).
+- Маркеры архива: `Вакансия в архиве`, `в архиве с N`, `не принимает отклики`, `Работодатель, вероятно, уже нашел`.
+
 ## FILES (high-level)
 
 | Файл | Что там |
