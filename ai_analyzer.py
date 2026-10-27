@@ -684,6 +684,10 @@ class VacancyAnalyzer:
             model_override=model_override,
             session_id=session_id,
         )
+        # qwen3.7-flash может уйти в reasoning и упереться в 6000 токенов.
+        # Даём 10000 на письмо — модель уложится в 1100 символов ответа.
+        from dataclasses import replace as _replace
+        request = _replace(request, max_output_tokens=10000)
 
         for attempt in range(2):
             active_request = request

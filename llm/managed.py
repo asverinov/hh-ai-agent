@@ -108,6 +108,12 @@ class ManagedLLMProvider:
                     )
                     raise LLMBlacklistError()
                 if not response.text.strip() or response.finish_reason == "length":
+                    logger.warning(
+                        "llm_empty_or_truncated provider=%s model=%s operation=%s "
+                        "finish_reason=%r text_len=%s",
+                        self.adapter.name, response.model, request.operation,
+                        response.finish_reason, len(response.text or ""),
+                    )
                     raise LLMInvalidResponseError()
                 parsed = None
                 if response_model is not None:
@@ -206,11 +212,17 @@ class ManagedLLMProvider:
                                 "invalid. Return only content matching the requested format."
                             ),
                         )
+                _raw = ""
+                try:
+                    _raw = (response.text if response else "") or ""
+                except Exception:
+                    _raw = ""
                 self.database.complete_llm_request(
                     row_id,
                     success=False,
                     finished_at=self._now(),
                     error_type=exc.category,
+                    raw_response=_raw or None,
                 )
                 logger.warning(
                     "llm_request provider=%s model=%s operation=%s success=false error_type=%s",
