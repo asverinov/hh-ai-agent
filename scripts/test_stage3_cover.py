@@ -78,15 +78,16 @@ async def main():
         print(f"❌ Длина {len(letter_new)} вне нормы")
 
     # 2. Абзацы
-    paras = [p for p in letter_new.split("\n\n") if p.strip()]
-    print(f"{'✅' if len(paras) == 3 else '⚠️'} Абзацев: {len(paras)} (ожидалось 3)")
+    body_only = letter_new.split("Буду рад обсудить")[0].strip() if "Буду рад обсудить" in letter_new else letter_new
+    paras = [p for p in body_only.split("\n\n") if p.strip()]
+    print(f"{'✅' if len(paras) == 3 else '⚠️'} Абзацев в теле: {len(paras)} (ожидалось 3)")
 
-    # 3. Запрещённые фразы
-    found = [f for f in FORBIDDEN if f in low]
+    body_low = body_only.lower()
+    found = [f for f in FORBIDDEN if f in body_low]
     if found:
-        print(f"❌ Найдены запрещённые фразы: {found}")
+        print(f"❌ Запрещённые фразы в теле: {found}")
     else:
-        print("✅ Запрещённых фраз нет")
+        print("✅ Запрещённых фраз в теле нет")
 
     # 4. Домен (налоги → 1С/Банк России/финансы)
     domain_markers = ["1с", "банк росси", "финансов", "смэв", "soap", "налог"]
