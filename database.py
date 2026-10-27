@@ -351,6 +351,8 @@ class Database:
                 "salary_currency": "TEXT NOT NULL DEFAULT ''",
                 "evaluation_json": "TEXT NOT NULL DEFAULT ''",
                 "description": "TEXT NOT NULL DEFAULT ''",
+                "queued_at": "TEXT",
+                "queue_priority": "INTEGER DEFAULT 0",
             }
             for name, definition in migrations.items():
                 if name not in columns:
@@ -458,6 +460,58 @@ class Database:
         connection.execute(
             "CREATE INDEX IF NOT EXISTS vacancies_applied_at_idx ON vacancies(applied_at)"
         )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_queued_read ON vacancies(status, queued_at, description)"
+        )
+        connection.execute(
+            "CREATE INDEX IF NOT EXISTS idx_queued_apply ON vacancies(queue_priority, queued_at, status)"
+        )
+
+    def dequeue_read(self) -> dict | None:
+        """Атомарно взять одну discovered-вакансию без description.
+
+        Ставит queued_at=datetime('now'), возвращает {id, title, url} или None.
+        """
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                UPDATE vacancies SET queued_at = datetime('now')
+                WHERE id = (
+                    SELECT id FROM vacancies
+                    WHERE status = ? AND (description IS NULL OR description = '')
+                      AND queued_at IS NULL
+                    ORDER BY discovered_at
+                    LIMIT 1
+                )
+                RETURNING id, title, url
+                """,
+                (VacancyStatus.DISCOVERED.value,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def update_description(
+        self, job_id: str, description: str, company: str, company_url: str
+    ) -> bool:
+        """Сохранить description/company/company_url и снять queued_at."""
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE vacancies
+                SET description = ?, company = ?, company_url = ?, queued_at = NULL
+                WHERE id = ?
+                """,
+                (description, company, company_url, job_id),
+            )
+            return cursor.rowcount == 1
+
+    def reset_read_queue(self, job_id: str) -> bool:
+        """Вернуть вакансию в очередь чтения (CAPTCHA/NETWORK/пустой description)."""
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "UPDATE vacancies SET queued_at = NULL WHERE id = ?",
+                (job_id,),
+            )
+            return cursor.rowcount == 1
 
     def update_cover_letter(self, job_id: str, cover_letter: str) -> bool:
         """Обновить сопроводительное письмо для вакансии в статусе pending_approval."""
