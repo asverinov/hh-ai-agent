@@ -513,6 +513,53 @@ class Database:
             )
             return cursor.rowcount == 1
 
+    def dequeue_assess(self) -> dict | None:
+        """Атомарно взять discovered с description и без evaluation_json.
+
+        Лимит попыток: analysis_retry_count < 3 (как ANALYSIS_MAX_ATTEMPTS в main.py).
+        Ставит queued_at=now, возвращает {id, title, description, url} или None.
+        """
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                UPDATE vacancies SET queued_at = datetime('now')
+                WHERE id = (
+                    SELECT id FROM vacancies
+                    WHERE status = ? AND description IS NOT NULL AND description != ''
+                      AND evaluation_json = '' AND queued_at IS NULL
+                      AND analysis_retry_count < 3
+                    ORDER BY discovered_at
+                    LIMIT 1
+                )
+                RETURNING id, title, description, url
+                """,
+                (VacancyStatus.DISCOVERED.value,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def reject_by_assess(
+        self, job_id: str, *, evaluation_json: str, confidence: float, verdict: str
+    ) -> bool:
+        """suitable=false: статус rejected_by_llm, снять queued_at."""
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE vacancies
+                SET status = ?, llm_decision = 0, llm_reason = ?, confidence = ?,
+                    evaluation_json = ?, queued_at = NULL, error_text = ''
+                WHERE id = ? AND status = ?
+                """,
+                (
+                    VacancyStatus.REJECTED_BY_LLM.value,
+                    verdict,
+                    confidence,
+                    evaluation_json,
+                    job_id,
+                    VacancyStatus.DISCOVERED.value,
+                ),
+            )
+            return cursor.rowcount == 1
+
     def update_cover_letter(self, job_id: str, cover_letter: str) -> bool:
         """Обновить сопроводительное письмо для вакансии в статусе pending_approval."""
         with self._connect() as connection:
@@ -799,7 +846,8 @@ class Database:
                     analysis_next_retry_at = CASE
                         WHEN analysis_retry_count + 1 < ? THEN ?
                         ELSE NULL
-                    END
+                    END,
+                    queued_at = NULL
                 WHERE id = ? AND status = ? AND analysis_retry_count < ?
                 """,
                 (
@@ -918,7 +966,7 @@ class Database:
                 UPDATE vacancies SET cover_letter = ?, llm_decision = ?,
                     llm_reason = ?, fit_summary = ?, confidence = ?,
                     evaluation_json = ?, error_text = '',
-                    analysis_next_retry_at = NULL
+                    analysis_next_retry_at = NULL, queued_at = NULL
                 WHERE id = ? AND status = ?
                 """,
                 (
