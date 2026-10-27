@@ -1,7 +1,7 @@
 # ДАЙДЖЕСТ СЕССИИ AI6 (26.10.2026)
 
 **Тема:** Каскадная архитектура Stage 0 → 1 → 2 + промпт сопроводов v4.2
-**Состояние на:** 27.10.2026, 17:45
+**Состояние на:** 27.10.2026, 21:35
 **Предыдущий дайджест:** `docs/AI5-digest.md` (от 22.10.2026)
 
 ---
@@ -112,6 +112,21 @@ TG-карточка → ручной apply
 - `expired: 6`
 - `discovered: 5`
 - `best_resume` distribution (по 28 pending): RP ~20, ROP ~4, RSP ~3, RPO ~1
+
+## 5.2. ЧТО СДЕЛАНО ВЕЧЕРОМ 27.10.2026 (19:00–21:35)
+
+| Коммит | Что |
+|---|---|
+| `7d83b91` | feat(search): `search_worker` — API `similar_vacancies` для 4 резюме, `per_page=100`, дедуп, `HHClient.close()` в `finally` |
+| `b8c83e7` | feat(db): миграция `queued_at` + `queue_priority` (2 индекса, `integrity_check=ok`) |
+
+**Состояние на 21:35:**
+- `discovered: 1708` (было 78, `search_worker` добавил 1630)
+- `pending_approval: 28`
+- `rejected_by_llm: 237`
+- `search_worker` крутится в фоне (PID 15169), полный цикл ~28 мин, API-нагрузка ~2.8/мин (в 600 раз меньше лимита 30/сек)
+
+**Написано:** `docs/PLAN_workers_v1.md` — детальный план 5 модулей + flock + методы `database.py`.
 
 ## 6. СЛЕДУЮЩИЕ ШАГИ
 
