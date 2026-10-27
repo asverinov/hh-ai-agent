@@ -560,6 +560,30 @@ class Database:
             )
             return cursor.rowcount == 1
 
+    def dequeue_cover_letter(self) -> dict | None:
+        """Атомарно взять discovered с evaluation_json, но без письма (suitable=true).
+
+        Ставит queued_at=now, возвращает {id, title, description, url,
+        evaluation_json, confidence} или None.
+        """
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                UPDATE vacancies SET queued_at = datetime('now')
+                WHERE id = (
+                    SELECT id FROM vacancies
+                    WHERE status = ? AND evaluation_json != ''
+                      AND cover_letter = '' AND llm_decision = 1
+                      AND queued_at IS NULL
+                    ORDER BY discovered_at
+                    LIMIT 1
+                )
+                RETURNING id, title, description, url, evaluation_json, confidence
+                """,
+                (VacancyStatus.DISCOVERED.value,),
+            ).fetchone()
+            return dict(row) if row else None
+
     def update_cover_letter(self, job_id: str, cover_letter: str) -> bool:
         """Обновить сопроводительное письмо для вакансии в статусе pending_approval."""
         with self._connect() as connection:
@@ -931,7 +955,7 @@ class Database:
                     status = ?, cover_letter = ?, llm_decision = ?,
                     llm_reason = ?, fit_summary = ?, confidence = ?, approval_requested_at = ?,
                     approval_expires_at = NULL, error_text = '',
-                    evaluation_json = ?
+                    evaluation_json = ?, queued_at = NULL
                 WHERE id = ? AND status = ?
                 """,
                 (
