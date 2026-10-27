@@ -185,14 +185,33 @@ async def classify_page(page: Any) -> PageState:
         )
         for state, selectors in checks:
             for selector in selectors:
-                if await page.locator(selector).is_visible():
-                    return state
+                try:
+                    if await page.locator(selector).count() > 0:
+                        return state
+                except Exception:
+                    continue
 
+        # Fallback 1: inner_text (ловит архив/скрытые, игнорирует \xa0 и разбивку)
+        try:
+            body_text = await page.locator("body").inner_text(timeout=5000)
+        except Exception:
+            body_text = ""
+        if body_text:
+            if re.search(
+                r"ваканси[яю]\s+в\s+архиве|в\s+архиве\s+с\s+\d|не\s+принимает\s+отклик|работодатель[,\s]+вероятно[,\s]+уже\s+нашел",
+                body_text, re.IGNORECASE,
+            ):
+                return PageState.VACANCY_REMOVED
+            if re.search(r"вам\s+недоступна\s+эта\s+ваканси", body_text, re.IGNORECASE):
+                return PageState.VACANCY_HIDDEN
+
+        # Fallback 2: короткий wait_for по ключевым селекторам
         if hasattr(page, "wait_for_timeout"):
             for fallback_selector, state in (
                 ('[data-qa="vacancy-description"]', PageState.VACANCY_LOADED),
                 ('.vacancy-description', PageState.VACANCY_LOADED),
                 ('[data-qa="vacancy-removed"]', PageState.VACANCY_REMOVED),
+                ('[data-qa="vacancy-archived"]', PageState.VACANCY_REMOVED),
                 ('[data-qa="captcha"]', PageState.CAPTCHA_DETECTED),
             ):
                 try:
