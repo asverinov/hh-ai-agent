@@ -410,7 +410,8 @@ async def process_vacancy(
 
     candidates = analyzer.select_resume_stage0(summary.title, details.description)
     if len(candidates) > 1:
-        best_resume, reason = await analyzer.select_resume_stage1(summary.title, details.description, candidates)
+        _stage1_analyzer = _context_analyzer if _context_analyzer is not None else analyzer
+        best_resume, reason = await _stage1_analyzer.select_resume_stage1(summary.title, details.description, candidates)
     else:
         best_resume = candidates[0]
         reason = "Stage 0 heuristic"
