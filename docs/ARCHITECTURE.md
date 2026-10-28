@@ -56,6 +56,33 @@ approval.approve_and_apply -> hh_client.submit_application
 
 ## CASCADE (Stage 0 -> 1 -> 2) - с 26.10.2026
 
+**Обновление 29.10.2026 (AI7):** Stage 1 в проде переведён на `_context_analyzer` (AITUNNEL/mimo) через `_stage1_analyzer = _context_analyzer if not None else analyzer` (коммит f9d5ed0). Раньше Stage 1 шёл через `analyzer` (gpt2giga), mimo не понимал.
+
+## ВОРКЕРЫ (AI7) - 3 из 5
+
+Фоновые процессы, каждый — отдельный `scripts/*.py` (`nohup env PYTHONPATH=. python3 ... > /tmp/*.log 2>&1 &`):
+
+| Воркер | Что | LLM? | Браузер? |
+|---|---|---|---|
+| `search_worker.py` | API `similar_vacancies` для 4 резюме -> `discovered` | нет | нет |
+| `read_description.py` | `discovered` без description -> CloakBrowser -> description | нет | **да** (flock + `.browser-apply-pending`) |
+| `assess_worker.py` | `discovered` с description -> Stage 0/1/2 -> `evaluation_json` | **да** (mimo) | нет |
+| `cover_letter_worker.py` | `discovered` с `llm_decision=1` -> письмо v4.4 -> `pending_approval` | **да** (qwen) | нет |
+| `apply_worker.py` | **НЕ СДЕЛАН** | — | — |
+
+**Очереди в БД (`vacancies`):**
+- `queued_at` — «в работе» (ставит `dequeue_*`), снимает `update_*`/`request_approval`/`mark_analysis_failed`.
+- `dequeue_read` -> `update_description` / `reset_read_queue` / `defer_read_queue(vid, minutes)`.
+- `dequeue_assess` -> `store_analysis` (ok) / `reject_by_assess` (reject) / `mark_analysis_failed` (ошибка).
+- `dequeue_cover_letter` -> `request_approval` (pending_approval).
+- **Правило:** любой метод, завершающий работу, обязан ставить `queued_at=NULL`.
+
+**Защита от капчи (`read_description`):**
+- 1-я капча: `defer_read_queue(vid, 60)` + пауза 300 сек.
+- 2-я подряд: `STOP` (break) — нужно вмешательство (VNC).
+- `dequeue_read` берёт `queued_at IS NULL OR queued_at <= now` (отложенные по времени).
+
+
 Убирает "слепоту" генератора писем: `generate_cover_letter` теперь получает `best_resume` + `full_text` выбранного резюме, а не единый профиль.
 
 **Архитектура:**
@@ -96,6 +123,9 @@ approval.approve_and_apply -> hh_client.submit_application
 | `LLM_TIMEOUT_SECONDS` | `180` | Оценка + письмо, ~3 мин на сложные вакансии |
 | `max_output_tokens` (cover letter) | `10000` | qwen обрезался на 6000 → letter=0 |
 | `session_id` | `context-main` / `cover-letter-main` | Кэш AITUNNEL |
+| `ds_cover_letter_digest.md` | **v4.4** (29.10.2026) | Промпт писем |
+| `cover_letter.style` | **удалён** (не передаётся в LLM) | Дубль v4.4 |
+| `cover_letter.closing` | двойные кавычки + `\n` | YAML не схлопывает |
 
 **Диагностика `managed.py`:** при `empty/truncated` логируется `finish_reason` + `text_len`, `raw_response` сохраняется при ошибке.
 
@@ -277,6 +307,11 @@ approval.approve_and_apply -> hh_client.submit_application
 ---
 
 ## NON-OBVIOUS (что легко упустить)
+
+- **`_safe_letter` -> `SystemExit(1)`** при greeting/footer (коммит ec53695). LLM **не должна** писать greeting/footer — это делает скрипт. Если написала — **баг кода/промпта**, воркер **падает** (`STOP: LLM вернула header/footer`), **не** retry. Тест: чистое body OK, greeting/footer -> SystemExit(1).
+- **`candidate` в `generate_cover_letter`** — **всегда** `{best_resume, resume_text}`, **без** `_candidate()` (profile.yaml). В LLM уходит **только** резюме + вакансия + дайджест.
+- **`closing`** — `profile.yaml`, **двойные кавычки** + `\n` (иначе YAML схлопывает переводы). **Планируется** вынести в константу (`cover_letter.py`).
+- **`style`** — **удалён** из `profile.yaml`, `config.py` дефолт `""` (в payload уходит пусто, не влияет).
 
 - **`os.environ` перезаписывает `.env`** — в `config.py:load_settings`:
   `values.update(os.environ)`. Если делал `source .env` для скриптов —

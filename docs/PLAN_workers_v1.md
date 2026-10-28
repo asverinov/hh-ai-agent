@@ -1,4 +1,6 @@
-# ПЛАН: 5 модулей обработки вакансий (v1.0 от 27.10.2026)
+# ПЛАН: 5 модулей обработки вакансий (v1.1 от 29.10.2026)
+
+**Статус на 29.10.2026: 3 из 5 модулей сделаны** (read_description, assess_worker, cover_letter_worker). Остались apply_worker и tg_bot (кнопка enqueue_apply).
 
 **Состояние на 27.10.2026, 21:35.** Сессия AI6 подходит к концу, план — для следующей сессии.
 
@@ -65,7 +67,11 @@ text
 
 ## 4. МОДУЛИ (по одному)
 
-### 4.1. `read_description.py` (первый, самый рискованный)
+### 4.1. `read_description.py` (СДЕЛАНО, коммиты 215982f, 6d44aea, b73fb55)
+
+**Статус:** работает в фоне. Защита от цикла капчи: `defer_read_queue(vid, 60)` + пауза 300 сек; 2 капчи подряд → STOP. `cleanup_stale_chromium()`, `flock` + `.browser-apply-pending`.
+
+### 4.1-исходно. `read_description.py` (первый, самый рискованный)
 
 **Что делает:** берёт `discovered` с `description=''` и `queued_at IS NULL`, читает через CloakBrowser, сохраняет `description` + `company` + `company_url`. **Не делает assess.**
 
@@ -88,7 +94,11 @@ text
 - `kill -9` Chromium → `SingletonLock` → нужен cleanup.
 - 1708 вакансий × 2 мин = 57 часов. **Долго.** Можно `--limit N` для теста.
 
-### 4.2. `assess_worker.py`
+### 4.2. `assess_worker.py` (СДЕЛАНО, коммит 4f4e976)
+
+**Статус:** работает. `dequeue_assess` + `reject_by_assess` + `store_analysis` (queued_at=NULL). Остановлен (накопилось 140+ писем).
+
+### 4.2-исходно. `assess_worker.py`
 
 **Что делает:** берёт `discovered` с `description != ''` и `evaluation_json=''`, делает `assess` (AITUNNEL, `mimo-v2.6-flash`), сохраняет `evaluation_json` + `confidence` + `verdict` + `best_resume`.
 
@@ -100,7 +110,11 @@ text
 
 **Риски:** LLM timeout 180 сек, `invalid_response` (mimo reasoning, но `max_output_tokens=16000` уже стоит).
 
-### 4.3. `cover_letter_worker.py`
+### 4.3. `cover_letter_worker.py` (СДЕЛАНО, коммиты babd145, ec53695)
+
+**Статус:** работает. `dequeue_cover_letter` + `request_approval` (queued_at=NULL). v4.4. LLM получает только {best_resume, resume_text} + vacancy, без profile. `_safe_letter` -> SystemExit(1) при greeting/footer.
+
+### 4.3-исходно. `cover_letter_worker.py`
 
 **Что делает:** берёт `discovered` с `evaluation_json != ''` и `cover_letter=''`, делает `generate_cover_letter` (AITUNNEL, `qwen3.7-flash`, v4.2), сохраняет, переводит в `pending_approval`.
 
@@ -160,11 +174,16 @@ text
 - `ec59c59` — каскад Stage 0→1→2
 - `6f7a7ed` — v4.2 промпт
 
-## 8. ЧТО НЕ СДЕЛАНО (на 27.10.2026, 21:35)
+## 8. ЧТО НЕ СДЕЛАНО (на 29.10.2026, 00:45)
 
-- 4 модуля (`read_description`, `assess_worker`, `cover_letter_worker`, `apply_worker`).
-- `tg_bot` — кнопка «Откликнуться» → `enqueue_apply`.
-- Калибровка 19 вакансий на MIMO (F1 каскада vs старого пайплайна).
-- Spot-check писем (28 pending).
-- Разбор reject-группы (много `conf=0.7-0.9, suitable=false`).
-- `main.py` — Stage 1 в проде на AITUNNEL (сейчас GigaChat).
+- **`apply_worker.py`** — не сделан. Логика: `enqueue_apply`/`dequeue_apply`/`complete_apply`, `flock` + `.browser-apply-pending`, **стоп при капче сразу** (apply — тяжёлая операция для hh.ru, риск бана).
+- **`tg_bot.py`** — кнопка «Откликнуться» -> `enqueue_apply` (сейчас `approve_and_apply`).
+- **`watch_workers.sh`** — монитор воркеров (запланирован).
+- **Уведомления в отдельный TG-канал** (`@asverinov` личка/канал) — запланировано.
+- **Архитектурная чистка `profile.yaml`**: вынести `closing` в константу (`cover_letter.py`), убрать `cover_letter` из `profile.yaml` полностью, `candidate` (кроме `github_url` -> отдельное поле), убрать инструкции из `ai_analyzer.py` (`_COVER_LETTER_SYSTEM`, retry-промпт) — оставить один источник: дайджест.
+- **Логирование `cover_letter` в `llm_requests`** — баг: письма не видны в учёте токенов.
+- **`Unclosed client session`** — aiohttp-сессия не закрывается в `ManagedLLMProvider`.
+- **Калибровка 19 вакансий на MIMO** — не сделана.
+- **`main.py`** — Stage 1 в проде на AITUNNEL (сделан коммит f9d5ed0, но main.py-путь в проде не проверен).
+
+
