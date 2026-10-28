@@ -28,6 +28,8 @@ ARBITER_LOCK = Path(".browser-arbiter.lock")
 APPLY_PENDING = Path(".browser-apply-pending")
 BROWSER_PROFILE = Path(".browser-profile")
 SLEEP_BETWEEN = (3, 30)
+CAPTCHA_STOP_AFTER = 2
+CAPTCHA_PAUSE_SEC = 300
 SLEEP_APPLY_WAIT = 5
 
 
@@ -119,6 +121,12 @@ async def read_one(hh: HHClient, db: Database, row: dict, dry_run: bool) -> str:
         log(f"EXPIRED {vid} state={state.value}")
         return "expired"
 
+    if state is PageState.CAPTCHA_DETECTED:
+        log(f"CAPTCHA {vid} state={state.value} desc_len={len(desc)}")
+        if not dry_run:
+            db.defer_read_queue(vid, 60)
+        return "captcha"
+
     if state is not PageState.VACANCY_LOADED:
         log(f"RETRY {vid} state={state.value} desc_len={len(desc)}")
         if not dry_run:
@@ -170,7 +178,8 @@ async def main() -> None:
             sys.exit(1)
 
         processed = 0
-        stats = {"ok": 0, "expired": 0, "retry": 0, "skip": 0, "fail": 0}
+        captcha_streak = 0
+        stats = {"ok": 0, "expired": 0, "retry": 0, "skip": 0, "fail": 0, "captcha": 0}
         while True:
             await wait_apply_idle()
             row = db.dequeue_read()
@@ -193,6 +202,17 @@ async def main() -> None:
                 res = await read_one(hh, db, row, args.dry_run)
                 stats[res] = stats.get(res, 0) + 1
                 processed += 1
+                if res == "captcha":
+                    captcha_streak += 1
+                    log(f"captcha_streak={captcha_streak}")
+                    if captcha_streak >= CAPTCHA_STOP_AFTER:
+                        log(f"STOP: {CAPTCHA_STOP_AFTER} капчи подряд — нужно вмешательство (VNC)")
+                        break
+                    log(f"пауза {CAPTCHA_PAUSE_SEC} сек после капчи")
+                    await asyncio.sleep(CAPTCHA_PAUSE_SEC)
+                else:
+                    if res == "ok":
+                        captcha_streak = 0
                 log(f"progress: {processed} {stats}")
             finally:
                 arbiter_release(fd)
