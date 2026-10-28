@@ -660,10 +660,9 @@ class VacancyAnalyzer:
 
         vacancy = {"title": vacancy_title, "description": vacancy_description}
 
-        candidate = self._candidate()
-        candidate.pop("additional_information", None)
-        if resume_text:
-            candidate = {"best_resume": best_resume, "resume_text": resume_text}
+        # В LLM уходит ТОЛЬКО выбранное резюме и текст вакансии.
+        # Полный _candidate() (profile.yaml) не используется — источник правды для письма: дайджест v4.3.
+        candidate = {"best_resume": best_resume or "", "resume_text": resume_text or ""}
 
         if system_override:
             system_text = system_override
@@ -676,7 +675,6 @@ class VacancyAnalyzer:
             payload={
                 "candidate": candidate,
                 "vacancy": vacancy,
-                "cover_letter": {"style": cover.style, "language": cover.language},
             },
             operation="cover_letter",
             structured=False,
@@ -738,6 +736,18 @@ class VacancyAnalyzer:
         return ""
 
     def _safe_letter(self, raw: str) -> tuple[str, bool]:
+        # СТОП-ТЕСТ: LLM не должна писать greeting/footer (это делает скрипт).
+        # Если написала — это баг кода/промпта, а не "плохое письмо". Падаем громко.
+        import sys as _sys
+        _lower = raw.strip().lower()
+        _greeting_hit = _lower.startswith(("добрый день", "здравствуйте", "доброе утро", "добрый вечер"))
+        _footer_hit = _lower.rstrip().endswith(("с уважением,", "с уважением", "буду рад обсудить, чем мой опыт может быть полезен для ваших проектов."))
+        if _greeting_hit or _footer_hit:
+            logger.critical(
+                "STOP: LLM вернула header/footer — баг кода/промпта. raw=%r",
+                raw[:300],
+            )
+            _sys.exit(1)
         logger.debug("RAW_LETTER: %r", raw[:2000])
         letter = raw.strip()
         letter = letter.replace("ё", "е").replace("Ё", "Е")

@@ -3,6 +3,7 @@ import re
 
 
 
+
 def _normalize_closing(s: str) -> str:
     """Нормализует closing для СРАВНЕНИЯ: убирает \r\n, схлопывает любые whitespace
     (включая переносы строк) в одиночный пробел, тримит.
