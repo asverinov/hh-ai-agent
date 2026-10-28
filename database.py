@@ -479,7 +479,7 @@ class Database:
                 WHERE id = (
                     SELECT id FROM vacancies
                     WHERE status = ? AND (description IS NULL OR description = '')
-                      AND queued_at IS NULL
+                      AND (queued_at IS NULL OR queued_at <= datetime('now'))
                     ORDER BY discovered_at
                     LIMIT 1
                 )
@@ -488,6 +488,22 @@ class Database:
                 (VacancyStatus.DISCOVERED.value,),
             ).fetchone()
             return dict(row) if row else None
+
+    def defer_read_queue(self, job_id: str, minutes: int) -> bool:
+        """Отложить вакансию в очереди чтения на N минут (при капче).
+
+        Ставит queued_at = now + minutes. dequeue_read её не возьмёт,
+        пока время не наступит (queued_at <= datetime('now')).
+        """
+        if minutes < 1:
+            raise ValueError("minutes must be positive")
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "UPDATE vacancies SET queued_at = datetime('now', '+' || ? || ' minutes') "
+                "WHERE id = ? AND status = ?",
+                (minutes, job_id, VacancyStatus.DISCOVERED.value),
+            )
+            return cursor.rowcount == 1
 
     def update_description(
         self, job_id: str, description: str, company: str, company_url: str
