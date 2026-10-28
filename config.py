@@ -565,7 +565,7 @@ def load_settings(
         cover_letter = CoverLetterProfile(
             language=_text(cover_data, "language", "ru"),
             max_length=max_length_value,
-            style=_text(cover_data, "style", "professional"),
+            style=_text(cover_data, "style", ""),
             required_portfolio_url=_text(cover_data, "required_portfolio_url"),
             closing=_text(cover_data, "closing"),
         )
