@@ -8,6 +8,7 @@ read_description: берёт discovered с description='' и queued_at IS NULL,
   python3 scripts/read_description.py --limit 3
   nohup env PYTHONPATH=. python3 scripts/read_description.py > /tmp/read.log 2>&1 &
 """
+from collections import deque
 import argparse
 import asyncio
 import fcntl
@@ -29,6 +30,9 @@ APPLY_PENDING = Path(".browser-apply-pending")
 BROWSER_PROFILE = Path(".browser-profile")
 SLEEP_BETWEEN = (3, 30)
 CAPTCHA_STOP_AFTER = 2
+ERROR_PAUSE_AFTER_ATTEMPTS = 20
+ERROR_PAUSE_THRESHOLD = 10
+ERROR_PAUSE_SEC = 1800
 CAPTCHA_PAUSE_SEC = 300
 SLEEP_APPLY_WAIT = 5
 
@@ -103,13 +107,17 @@ def mark_expired(db: Database, vid: str, state: PageState) -> None:
 async def read_one(hh: HHClient, db: Database, row: dict, dry_run: bool) -> str:
     """Возвращает статус: ok | expired | skip | retry | fail."""
     vid = row["id"]
+    url = row.get("url", "")
     summary = VacancySummary(id=vid, title=row["title"], url=row["url"], search_query="")
     try:
         details = await hh.read_vacancy(summary, None)
     except Exception as e:
-        log(f"FAIL read_vacancy {vid}: {type(e).__name__}: {str(e)[:150]}")
+        log(f"ERROR read_vacancy {vid}: {type(e).__name__}: {str(e)[:150]}")
         if not dry_run:
-            db.reset_read_queue(vid)
+            db.log_read_error(vacancy_id=vid, state="exception", url=url,
+                              error_detail=f"{type(e).__name__}: {str(e)[:500]}")
+            cnt = db.mark_read_error(vid)
+            log(f"backoff {vid} read_error_count={cnt}")
         return "retry"
 
     state = details.state
@@ -128,15 +136,22 @@ async def read_one(hh: HHClient, db: Database, row: dict, dry_run: bool) -> str:
         return "captcha"
 
     if state is not PageState.VACANCY_LOADED:
-        log(f"RETRY {vid} state={state.value} desc_len={len(desc)}")
+        log(f"ERROR {vid} state={state.value} desc_len={len(desc)}")
         if not dry_run:
-            db.reset_read_queue(vid)
+            db.log_read_error(vacancy_id=vid, state=state.value, url=url,
+                              body_snippet=desc[:500],
+                              error_detail=f"state={state.value} desc_len={len(desc)}")
+            cnt = db.mark_read_error(vid)
+            log(f"backoff {vid} read_error_count={cnt}")
         return "retry"
 
     if not desc:
-        log(f"RETRY {vid} empty description")
+        log(f"ERROR {vid} empty description")
         if not dry_run:
-            db.reset_read_queue(vid)
+            db.log_read_error(vacancy_id=vid, state=state.value, url=url,
+                              error_detail="empty description")
+            cnt = db.mark_read_error(vid)
+            log(f"backoff {vid} read_error_count={cnt}")
         return "retry"
 
     if dry_run:
@@ -180,6 +195,8 @@ async def main() -> None:
         processed = 0
         captcha_streak = 0
         stats = {"ok": 0, "expired": 0, "retry": 0, "skip": 0, "fail": 0, "captcha": 0}
+        recent_errors: deque = deque(maxlen=ERROR_PAUSE_AFTER_ATTEMPTS)
+        paused_once = False
         while True:
             await wait_apply_idle()
             row = db.dequeue_read()
@@ -213,6 +230,24 @@ async def main() -> None:
                 else:
                     if res == "ok":
                         captcha_streak = 0
+                if res in ("retry", "fail"):
+                    recent_errors.append(1)
+                elif res in ("ok", "expired", "skip"):
+                    recent_errors.append(0)
+                if len(recent_errors) == ERROR_PAUSE_AFTER_ATTEMPTS:
+                    err_count = sum(recent_errors)
+                    if err_count > ERROR_PAUSE_THRESHOLD:
+                        if paused_once:
+                            log(f"STOP: {err_count}/{len(recent_errors)} ошибок после паузы — нужно вмешательство")
+                            break
+                        log(f"ERROR_RATE: {err_count}/{len(recent_errors)} — пауза {ERROR_PAUSE_SEC} сек")
+                        await asyncio.sleep(ERROR_PAUSE_SEC)
+                        recent_errors.clear()
+                        paused_once = True
+                    elif paused_once:
+                        log(f"ERROR_RATE: {err_count}/{len(recent_errors)} — восстановились, снимаю паузу")
+                        paused_once = False
+                        recent_errors.clear()
                 log(f"progress: {processed} {stats}")
             finally:
                 arbiter_release(fd)

@@ -136,12 +136,23 @@ def _iso(value: datetime) -> str:
     return _as_utc(value).isoformat()
 
 
+class _AutoCloseConnection(sqlite3.Connection):
+    """sqlite3.Connection, который закрывается на выходе из `with`.
+    Стандартный Connection.__exit__ делает только commit/rollback —
+    коннект остаётся открытым (FD-утечка)."""
+    def __exit__(self, exc_type, exc, tb):
+        try:
+            return super().__exit__(exc_type, exc, tb)
+        finally:
+            self.close()
+
+
 class Database:
     def __init__(self, path: str | Path):
         self.path = Path(path)
 
     def _connect(self) -> sqlite3.Connection:
-        connection = sqlite3.connect(self.path, timeout=10)
+        connection = sqlite3.connect(self.path, timeout=10, factory=_AutoCloseConnection)
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA foreign_keys = ON")
         return connection
@@ -172,6 +183,33 @@ class Database:
                 "CREATE INDEX IF NOT EXISTS seen_vacancies_seen_at_idx "
                 "ON seen_vacancies(seen_at)"
             )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS read_errors (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    vacancy_id TEXT NOT NULL,
+                    state TEXT NOT NULL DEFAULT '',
+                    url TEXT NOT NULL DEFAULT '',
+                    http_status INTEGER,
+                    body_snippet TEXT NOT NULL DEFAULT '',
+                    error_detail TEXT NOT NULL DEFAULT '',
+                    created_at TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS read_errors_vacancy_idx "
+                "ON read_errors(vacancy_id)"
+            )
+            connection.execute(
+                "CREATE INDEX IF NOT EXISTS read_errors_created_idx "
+                "ON read_errors(created_at)"
+            )
+            _cols = {row[1] for row in connection.execute("PRAGMA table_info(vacancies)")}
+            if "read_error_count" not in _cols:
+                connection.execute(
+                    "ALTER TABLE vacancies ADD COLUMN read_error_count INTEGER NOT NULL DEFAULT 0"
+                )
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS evaluations (
@@ -480,7 +518,7 @@ class Database:
                     SELECT id FROM vacancies
                     WHERE status = ? AND (description IS NULL OR description = '')
                       AND (queued_at IS NULL OR queued_at <= datetime('now'))
-                    ORDER BY discovered_at
+                    ORDER BY read_error_count ASC, discovered_at
                     LIMIT 1
                 )
                 RETURNING id, title, url
@@ -488,6 +526,49 @@ class Database:
                 (VacancyStatus.DISCOVERED.value,),
             ).fetchone()
             return dict(row) if row else None
+
+    def log_read_error(
+        self,
+        *,
+        vacancy_id: str,
+        state: str = "",
+        url: str = "",
+        http_status: int | None = None,
+        body_snippet: str = "",
+        error_detail: str = "",
+    ) -> int:
+        """Историческая запись об ошибке чтения (read_description)."""
+        from datetime import datetime as _dt
+        created_at = _dt.now().isoformat(timespec="seconds")
+        with self._connect() as connection:
+            cur = connection.execute(
+                """
+                INSERT INTO read_errors
+                    (vacancy_id, state, url, http_status, body_snippet, error_detail, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (vacancy_id, state, url, http_status,
+                 body_snippet[:2000], error_detail[:2000], created_at),
+            )
+            return int(cur.lastrowid or 0)
+
+    def mark_read_error(self, job_id: str) -> int:
+        """Инкремент read_error_count + экспоненциальный backoff queued_at.
+        Возвращает новый read_error_count (0 если вакансия не найдена)."""
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT read_error_count FROM vacancies WHERE id=?", (job_id,)
+            ).fetchone()
+            if row is None:
+                return 0
+            new_count = (row[0] or 0) + 1
+            delay_min = min(60 * (2 ** (new_count - 1)), 1440)
+            connection.execute(
+                "UPDATE vacancies SET read_error_count=?, "
+                "queued_at=datetime('now', ?) WHERE id=?",
+                (new_count, f"+{delay_min} minutes", job_id),
+            )
+            return new_count
 
     def defer_read_queue(self, job_id: str, minutes: int) -> bool:
         """Отложить вакансию в очереди чтения на N минут (при капче).
