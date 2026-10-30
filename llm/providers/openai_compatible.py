@@ -51,7 +51,7 @@ class OpenAICompatibleProvider:
         payload: dict[str, object] = {
             "model": request.model,
             "messages": [
-                {"role": "system", "content": system_instructions},
+                { "role": "system", "content": [{"type": "text", "text": system_instructions, "cache_control": {"type": "ephemeral"}}] if getattr(request, "cache_control", False) else system_instructions },
                 {"role": "user", "content": request.user_content},
             ],
             "temperature": request.temperature,
@@ -96,13 +96,16 @@ class OpenAICompatibleProvider:
         if not isinstance(text, str):
             raise LLMInvalidResponseError()
         usage = data.get("usage", {}) if isinstance(data, dict) else {}
+        _details = usage.get("prompt_tokens_details") or {}
+        _cached = _details.get("cached_tokens") or usage.get("cached_tokens") or 0
         return LLMResponse(
             text=text,
             provider=self.name,
             model=data.get("model") if isinstance(data.get("model"), str) else request.model,
             request_id=data.get("id") if isinstance(data.get("id"), str) else None,
             latency_ms=round((time.perf_counter() - started) * 1000),
-            input_tokens=usage.get("prompt_tokens")
+            input_tokens=usage.get("prompt_tokens"),
+            cached_tokens=_cached
             if isinstance(usage.get("prompt_tokens"), int)
             else None,
             output_tokens=usage.get("completion_tokens")

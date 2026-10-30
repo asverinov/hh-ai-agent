@@ -340,6 +340,7 @@ class VacancyAnalyzer:
         model_override: str | None = None,
         session_id: str | None = None,
         system_override: str | None = None,
+        cache_control: bool = False,
     ) -> LLMRequest:
         llm = self.settings.llm
         final_system = system_override if system_override else system_instructions
@@ -354,6 +355,7 @@ class VacancyAnalyzer:
             json_schema=SuitabilityResult.model_json_schema() if structured else None,
             vacancy_id=vacancy_id,
             session_id=session_id,
+            cache_control=cache_control,
         )
 
     def select_resume_stage0(self, title: str, description: str) -> list[str]:
@@ -364,7 +366,7 @@ class VacancyAnalyzer:
                 candidates.update(rule.candidates)
         return list(candidates) if candidates else ["RP"]
 
-    async def select_resume_stage1(self, title: str, description: str, candidates: list[str]) -> tuple[str, str]:
+    async def select_resume_stage1(self, title: str, description: str, candidates: list[str], *, vacancy_id: str | None = None) -> tuple[str, str]:
         import json as _json
         summaries = {c: self.settings.profile.resumes[c].summary for c in candidates if c in self.settings.profile.resumes}
         system = (
@@ -387,6 +389,7 @@ class VacancyAnalyzer:
             payload=payload,
             operation="stage1_select",
             structured=False,
+            vacancy_id=vacancy_id,
             model_override=self.settings.llm.assess_model,
             session_id="stage1-select",
         )
@@ -681,6 +684,7 @@ class VacancyAnalyzer:
             vacancy_id=vacancy_id,
             model_override=model_override,
             session_id=session_id,
+            cache_control=cache_control,
         )
         # qwen3.7-flash может уйти в reasoning и упереться в 6000 токенов.
         # Даём 10000 на письмо — модель уложится в 1100 символов ответа.

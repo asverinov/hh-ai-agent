@@ -15,6 +15,7 @@ class LLMRequest:
     json_schema: dict[str, object] | None = None
     vacancy_id: str | None = None
     session_id: str | None = None
+    cache_control: bool = False
 
 
 @dataclass(frozen=True)
@@ -25,5 +26,6 @@ class LLMResponse:
     request_id: str | None = None
     latency_ms: int = 0
     input_tokens: int | None = None
+    cached_tokens: int = 0
     output_tokens: int | None = None
     finish_reason: str | None = None

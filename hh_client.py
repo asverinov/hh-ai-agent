@@ -305,27 +305,6 @@ class HHClient:
             logger.warning("read_resume_id_failed code=%s error=%s", code, exc)
         return None
 
-    async def search_page(
-        self, resume_id: str, page: int = 0, per_page: int = 100
-    ) -> dict[str, Any]:
-        """Один API-запрос similar_vacancies (без фильтров, без seen).
-
-        Возвращает сырой JSON: {items, pages, found, page, per_page}.
-        """
-        if not await self._refresh_token_if_needed():
-            raise RuntimeError("auth_error")
-        session = await self._get_http_session()
-        url = f"https://api.hh.ru/resumes/{resume_id}/similar_vacancies"
-        params = {"page": page, "per_page": per_page}
-        headers = {"Authorization": f"Bearer {self._access_token}"}
-        async with session.get(url, params=params, headers=headers) as resp:
-            if resp.status == 403:
-                text = await resp.text()
-                raise RuntimeError(f"forbidden: {text[:200]}")
-            if resp.status != 200:
-                text = await resp.text()
-                raise RuntimeError(f"http {resp.status}: {text[:200]}")
-            return await resp.json()
 
     def _read_active_resume(self) -> dict[str, str] | None:
         path = self.settings.resumes_config_path
@@ -394,7 +373,7 @@ class HHClient:
         logger.info("hh_token_refreshed expires_in=%s", expires_in)
         return True
 
-    async def _fetch_similar_page(
+    async def fetch_similar_page(
         self,
         resume_id: str,
         page: int,

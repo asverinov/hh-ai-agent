@@ -68,7 +68,7 @@ async def assess_one(analyzer, settings, db, row: dict, dry_run: bool) -> str:
                                         max_attempts=ANALYSIS_MAX_ATTEMPTS)
             return "fail"
         if len(candidates) > 1:
-            best_resume, reason = await analyzer.select_resume_stage1(title, desc, candidates)
+            best_resume, reason = await analyzer.select_resume_stage1(title, desc, candidates, vacancy_id=vid)
         else:
             best_resume, reason = candidates[0], "Stage 0 heuristic"
 

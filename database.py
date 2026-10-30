@@ -1452,6 +1452,7 @@ class Database:
         success: bool,
         finished_at: datetime,
         input_tokens: int | None = None,
+        cached_tokens: int = 0,
         output_tokens: int | None = None,
         latency_ms: int | None = None,
         provider_request_id: str | None = None,
@@ -1462,7 +1463,7 @@ class Database:
             cursor = connection.execute(
                 """
                 UPDATE llm_requests SET
-                    finished_at = ?, success = ?, input_tokens = ?,
+                    finished_at = ?, success = ?, input_tokens = ?, cached_tokens = ?,
                     output_tokens = ?, latency_ms = ?, provider_request_id = ?,
                     error_type = ?, raw_response = ?
                 WHERE id = ? AND success IS NULL
@@ -1471,6 +1472,7 @@ class Database:
                     _iso(finished_at),
                     int(success),
                     input_tokens,
+                    cached_tokens,
                     output_tokens,
                     latency_ms,
                     provider_request_id,

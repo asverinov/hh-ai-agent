@@ -184,6 +184,7 @@ class ManagedLLMProvider:
                     success=True,
                     finished_at=self._now(),
                     input_tokens=response.input_tokens,
+                cached_tokens=getattr(response, 'cached_tokens', 0),
                     output_tokens=response.output_tokens,
                     latency_ms=response.latency_ms,
                     provider_request_id=response.request_id,
