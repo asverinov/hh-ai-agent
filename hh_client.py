@@ -565,67 +565,24 @@ class HHClient:
         try:
             for attempt in range(1, 4):
                 try:
-                    await page.goto(
-                        "https://hh.ru/applicant/resumes",
-                        wait_until="domcontentloaded",
-                        timeout=90_000,
-                    )
+                    await page.goto("https://hh.ru/applicant/resumes", wait_until="domcontentloaded", timeout=60_000)
                     await self.sleep(2)
-                    login_indicators = page.locator(
-                        'input[type="tel"], input[data-qa*="login"], a[data-qa="mainmenu_applicantAccess"], a:has-text("Войти"), button:has-text("Войти"), [data-qa*="login-submit"]'
-                    )
-                    logged_in_markers = page.locator(
-                        '[data-qa="mainmenu_applicantProfile"], [data-qa="mainmenu_profile"], [data-qa="mainmenu_resumes"], [data-qa*="resume-title"]'
-                    )
+                    login_indicators = page.locator('input[type="tel"], input[data-qa*="login"], a[data-qa="mainmenu_applicantAccess"], a:has-text("Войти"), button:has-text("Войти"), [data-qa*="login-submit"]')
+                    logged_in_markers = page.locator('[data-qa="mainmenu_applicantProfile"], [data-qa="mainmenu_profile"], [data-qa="mainmenu_resumes"], [data-qa*="resume-title"]')
                     page_url = str(getattr(page, "url", "") or "")
-                    
-                    is_unauthenticated = (
-                        "account/login" in page_url
-                        or "auth" in page_url
-                        or await login_indicators.first.is_visible()
-                    )
+                    is_unauthenticated = ("account/login" in page_url or "auth" in page_url or await login_indicators.first.is_visible())
                     if not is_unauthenticated and await logged_in_markers.first.is_visible():
+                        logger.info("hh_login_ok")
                         return True
-
-                    if is_unauthenticated or not await logged_in_markers.first.is_visible():
-                        # If not clearly logged in
-                        if hasattr(self.context, "_is_fake") or "test" in str(type(page)):
-                            return True
-                        if self.settings.browser_headless:
-                            logger.error("hh_login_required headless=true")
-                            return False
-
-                        print("\n" + "=" * 60)
-                        print("🔑 ТРЕБУЕТСЯ АВТОРИЗАЦИЯ НА HH.RU")
-                        print("1. В открывшемся окне браузера войдите в свой аккаунт HH.ru.")
-                        print("2. После успешного входа вернитесь сюда и нажмите ENTER.")
-                        print("=" * 60 + "\n")
-
-                        await asyncio.to_thread(
-                            input,
-                            "👉 Войдите на HH.ru в браузере и затем нажмите ENTER здесь: ",
-                        )
-                        await page.goto(
-                            "https://hh.ru/applicant/resumes",
-                            wait_until="domcontentloaded",
-                            timeout=90_000,
-                        )
-                        await self.sleep(2)
-                        page_url = str(getattr(page, "url", "") or "")
-                        if "account/login" not in page_url and not await login_indicators.first.is_visible():
-                            print("✅ Успешный вход на HH.ru! Запускаем работу агента...\n")
-                            return True
-                        return False
-                    return True
+                    logger.warning(f"hh_login_check_attempt_{attempt}_failed url={page_url}")
                 except Exception as exc:
-                    logger.warning(
-                        "hh_login_check_failed attempt=%s error=%s", attempt, exc
-                    )
-                    if attempt < 3:
-                        await self.sleep(5)
+                    logger.warning(f"hh_login_check_attempt_{attempt}_error={exc}")
+                await self.sleep(3)
+            logger.error("hh_login_failed_all_attempts")
             return False
         finally:
             await page.close()
+
 
     async def _response_available(self, page: Any, url: str) -> bool:
         await page.goto(url.split("?")[0], wait_until="domcontentloaded", timeout=30_000)

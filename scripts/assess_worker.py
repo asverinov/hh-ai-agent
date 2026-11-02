@@ -147,7 +147,7 @@ async def main() -> None:
     if not api_key:
         log("FATAL: AITUNNEL_API_KEY пуст")
         sys.exit(1)
-    adapter = OpenAICompatibleProvider(base_url, api_key, json_mode=False, reasoning_enabled=None)
+    adapter = OpenAICompatibleProvider(base_url, api_key, json_mode=False, reasoning_enabled=False)
     provider = ManagedLLMProvider(adapter, db, max_retries=1, max_requests_per_day=2000)
     analyzer = VacancyAnalyzer(settings, provider)
 

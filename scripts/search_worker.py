@@ -17,6 +17,8 @@ from pathlib import Path
 from config import load_settings
 from database import Database
 from hh_client import HHClient
+from hh_client import _is_junior_title, _parse_salary
+from vacancy_filter import title_rejection_reason
 
 LOG = Path(f"search_worker_{datetime.now().strftime('%Y%m%d_%H%M')}.log")
 RESUME_CODES = ["RP", "RSP", "RPO", "ROP"]

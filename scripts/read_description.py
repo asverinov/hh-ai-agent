@@ -24,16 +24,27 @@ from approval import ApprovalGuard
 from browser_backend import create_browser_backend
 from hh_client import HHClient, PageState, VacancySummary
 
+
+# Паузы между пачками чтений
+BATCH_SIZE_MIN = 150
+BATCH_SIZE_MAX = 190
+BATCH_PAUSE_MIN = 600
+BATCH_PAUSE_MAX = 1200
+
+
 LOG = Path(f"read_description_{datetime.now().strftime('%Y%m%d_%H%M')}.log")
 ARBITER_LOCK = Path(".browser-arbiter.lock")
 APPLY_PENDING = Path(".browser-apply-pending")
 BROWSER_PROFILE = Path(".browser-profile")
-SLEEP_BETWEEN = (3, 30)
+SLEEP_BETWEEN = (10, 40)
 CAPTCHA_STOP_AFTER = 2
 ERROR_PAUSE_AFTER_ATTEMPTS = 20
 ERROR_PAUSE_THRESHOLD = 10
 ERROR_PAUSE_SEC = 1800
 CAPTCHA_PAUSE_SEC = 300
+NETWORK_ERROR_PAUSE_1 = 600
+NETWORK_ERROR_PAUSE_2 = 1800
+MAX_CONSECUTIVE_NETWORK_ERRORS = 3
 SLEEP_APPLY_WAIT = 5
 
 
@@ -197,6 +208,8 @@ async def main() -> None:
         stats = {"ok": 0, "expired": 0, "retry": 0, "skip": 0, "fail": 0, "captcha": 0}
         recent_errors: deque = deque(maxlen=ERROR_PAUSE_AFTER_ATTEMPTS)
         paused_once = False
+        batch_read_count = 0
+        batch_target = random.randint(BATCH_SIZE_MIN, BATCH_SIZE_MAX)
         while True:
             await wait_apply_idle()
             row = db.dequeue_read()
@@ -227,9 +240,33 @@ async def main() -> None:
                         break
                     log(f"пауза {CAPTCHA_PAUSE_SEC} сек после капчи")
                     await asyncio.sleep(CAPTCHA_PAUSE_SEC)
+                elif res == "retry":
+                    if args.limit:
+                        log(f'TEST MODE: ошибка на вакансии {row["id"]}, завершаю без пауз')
+                        break
+                    network_error_streak += 1
+                    log(f"network_error_streak={network_error_streak}")
+                    if network_error_streak == 1:
+                        log(f"1-я сетевая ошибка подряд. Пауза {NETWORK_ERROR_PAUSE_1} сек.")
+                        await asyncio.sleep(NETWORK_ERROR_PAUSE_1)
+                    elif network_error_streak == 2:
+                        log(f"2-я сетевая ошибка подряд. Пауза {NETWORK_ERROR_PAUSE_2} сек.")
+                        await asyncio.sleep(NETWORK_ERROR_PAUSE_2)
+                    elif network_error_streak >= MAX_CONSECUTIVE_NETWORK_ERRORS:
+                        log(f"STOP: {MAX_CONSECUTIVE_NETWORK_ERRORS} сетевые ошибки подряд — останавливаюсь.")
+                        break
                 else:
                     if res == "ok":
                         captcha_streak = 0
+                        batch_read_count += 1
+                        
+                        # Проверка на паузу между пачками
+                        if batch_read_count >= batch_target:
+                            pause_sec = random.randint(BATCH_PAUSE_MIN, BATCH_PAUSE_MAX)
+                            log(f"BATCH PAUSE: прочитано {batch_read_count} вакансий. Отдыхаю {pause_sec//60} мин.")
+                            await asyncio.sleep(pause_sec)
+                            batch_read_count = 0
+                            batch_target = random.randint(BATCH_SIZE_MIN, BATCH_SIZE_MAX)
                 if res in ("retry", "fail"):
                     recent_errors.append(1)
                 elif res in ("ok", "expired", "skip"):
