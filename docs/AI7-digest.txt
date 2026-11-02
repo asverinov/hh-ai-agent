@@ -1,0 +1,158 @@
+ДАЙДЖЕСТ СЕССИИ AI7 (28–29.10.2026)
+Тема: Воркеры каскада (read_description, assess_worker, cover_letter_worker), защита от капчи, чистка промптов
+Состояние на: 29.10.2026, 00:50
+Предыдущий дайджест: docs/AI6-digest.md (от 26.10.2026)
+
+1. ЧТО СДЕЛАНО
+1.1. Разогрев: Stage 1 на AITUNNEL (коммит f9d5ed0)
+main.py:413 — _stage1_analyzer = _context_analyzer if not None else analyzer. Раньше Stage 1 шёл через analyzer (gpt2giga), mimo не понимал model_override.
+
+Smoke test_stage12_v2.py: Stage 0 [ROP,RSP,RP,RPO] -> Stage 1 RP -> Stage 2 suitable=True conf=0.9117.
+
+1.2. Воркеры (3 из 5)
+Воркер	Коммит	Что
+read_description.py	215982f, 6d44aea	discovered без description -> CloakBrowser -> description; flock + .browser-apply-pending; cleanup_stale_chromium
+assess_worker.py	4f4e976	discovered с description -> Stage 0/1/2 -> evaluation_json; stop (накопилось 140+)
+cover_letter_worker.py	babd145, ec53695	discovered llm_decision=1 -> письмо v4.4 -> pending_approval; сейчас генерирует 13
+Не сделаны: apply_worker.py, tg_bot кнопка enqueue_apply.
+
+1.3. Методы database.py (коммиты fdbdf19, c9780ab, 7a2ff60, b73fb55)
+dequeue_read / update_description / reset_read_queue / defer_read_queue.
+
+dequeue_assess / reject_by_assess (+ переиспользован store_analysis).
+
+dequeue_cover_letter (+ переиспользован request_approval).
+
+queued_at / queue_priority — в init() (идемпотентно).
+
+Правило: любой метод, завершающий работу, ставит queued_at=NULL (иначе вакансия застревает). Найдено 3 бага: store_analysis, mark_analysis_failed, request_approval не снимали queued_at.
+
+1.4. Защита от цикла капчи (6d44aea, b73fb55)
+Инцидент: ночью read_description зациклился на одной вакансии (136222279) — 354 retry за 4 часа (08:43–12:45), потому что reset_read_queue возвращал ту же (самую старую) вакансию.
+Фикс: CAPTCHA_DETECTED -> defer_read_queue(vid, 60) + пауза 300 сек; 2 капчи подряд -> STOP (break, нужно VNC). dequeue_read берёт queued_at IS NULL OR queued_at <= now. OK сбрасывает captcha_streak.
+
+1.5. Чистка промптов писем (коммиты ec53695, 50fde65)
+LLM получает только {best_resume, resume_text} + вакансия + дайджест. Убраны cover_letter: {style, language} из payload и _candidate() (profile.yaml).
+
+_safe_letter -> SystemExit(1) при greeting/footer (LLM не должна писать — это делает скрипт; если написала — баг, падаем громко, не retry).
+
+_GREETING_RE убран из normalize_cover_letter_body (он вырезал greeting, который скрипт сам добавлял).
+
+style удалён из profile.yaml, config.py дефолт "" (в payload пусто, не влияет).
+
+closing — в profile.yaml, двойные кавычки + \n (YAML не схлопывает): «Буду рад обсудить…\n\nС уважением,\nАлександр Сверинов».
+
+ds_cover_letter_digest.md — v4.4 (29.10.2026, от Эксперта). v4.3 — в bak/.
+
+1.6. Прочее
+ds_cover_letter_digest.md = v4.4 (размер: v4.3 18K -> v4.4 49K? — уточнить). Бэкапы в docs/datasets/bak/.
+
+Все .bak* (172 файла) перенесены в bak/ рядом с файлом (коммит 611969e).
+
+agent.db миграции: queued_at, queue_priority (b8c83e7).
+
+search_worker (PID 15169) — API similar_vacancies, discovered ~2500.
+
+2. РЕЗУЛЬТАТЫ
+2.1. Оценка assess_worker за сутки (28.10)
+mimo-v2.6-flash: 675 vacancy_analysis + 504 stage1_select -> ~6.2M входных + 1.7M выходных токенов (~400 руб).
+
+ok=139, reject=727 (84% отсеяно).
+
+Вывод: деньги ушли на оценку, не на письма. cover_letter_worker ночью не работал (остановлен после 5).
+
+2.2. Статусы на 29.10 (00:45)
+text
+discovered        2599
+rejected_by_llm   979
+skipped           38
+pending_approval  35
+rejected_by_filter 35
+applied           29
+expired           19
+apply_failed      17
+analysis_failed   7
+2.3. Очереди
+discovered без description: ~2373 (read_description ~20 часов).
+
+discovered с evaluation, llm_decision=1, без письма: ~140 (cover_letter_worker).
+
+discovered прочитано, не оценено: 15 (assess_worker).
+
+2.4. Письма v4.4 (13, перегенерированы)
+Имя (Александр Сверинов) — есть у всех.
+
+Footer — пустая строка + «С уважением,» + перевод + «Александр Сверинов» (FOOTER_OK).
+
+Дублей greeting/footer — нет.
+
+Длины 1131–1417 (в норме 900–1500).
+
+Ждут оценки Эксперта (дамп /tmp/letters_13_for_expert.txt).
+
+3. АРХИТЕКТУРА (краткая, обновлено)
+text
+hh.ru API (search_worker) -> discovered
+   ↓
+read_description (CloakBrowser, flock) -> description
+   ↓
+assess_worker (mimo, Stage 0->1->2) -> evaluation_json (llm_decision)
+   ↓
+cover_letter_worker (qwen, v4.4) -> pending_approval
+   ↓
+TG-карточка -> ручной apply (apply_worker — НЕ СДЕЛАН)
+Модели:
+
+ASSESS_MODEL=mimo-v2.6-flash (Stage 1+2)
+
+COVER_LETTER_MODEL=qwen3.7-flash (письма)
+
+LLM_MODEL=GigaChat-2-Pro — legacy
+
+4. ТЕХДОЛГ (в план)
+apply_worker.py — не сделан. Стоп при капче сразу (apply — тяжёлая операция, риск бана).
+
+tg_bot кнопка enqueue_apply (сейчас approve_and_apply).
+
+Уведомления в отдельный TG-канал (@asverinov — личка/канал; бот не может писать по @username, нужен числовой chat_id или канал -100...).
+
+profile.yaml — архитектурная чистка: closing -> константа (cover_letter.py); убрать cover_letter полностью; candidate (кроме github_url -> отдельное поле); убрать инструкции из ai_analyzer.py (_COVER_LETTER_SYSTEM, retry-промпт) — один источник: дайджест.
+
+Логирование cover_letter в llm_requests — письма не видны в учёте токенов.
+
+Unclosed client session — aiohttp-сессия не закрывается в ManagedLLMProvider/провайдере.
+
+Калибровка 19 вакансий на MIMO — не сделана.
+
+watch_workers.sh — монитор воркеров (запланирован).
+
+main.py — Stage 1 в проде на AITUNNEL (коммит f9d5ed0, но main.py-путь не проверен).
+
+5. СЛЕДУЮЩИЕ ШАГИ
+Эксперт оценивает 13 писем v4.4 -> вердикт.
+
+apply_worker.py — с защитой от капчи (стоп сразу).
+
+tg_bot — кнопка enqueue_apply + управление воркерами (/stop_read, /stop_all, /status).
+
+Чистка profile.yaml (техдолг 4).
+
+Калибровка 19 -> 20 ID.
+
+6. КОМАНДЫ
+Запуск воркеров:
+cd ~/hh-ai-agent && source venv/bin/activate
+PYTHONPATH=. python3 scripts/read_description.py --limit 1 --dry-run
+PYTHONPATH=. python3 scripts/assess_worker.py --limit 1 --dry-run
+PYTHONPATH=. python3 scripts/cover_letter_worker.py --limit 1 --dry-run
+nohup env PYTHONPATH=. python3 scripts/<worker>.py > /tmp/<worker>.log 2>&1 &
+
+Тесты:
+PYTHONPATH=. python3 scripts/test_stage12_v2.py
+PYTHONPATH=. python3 scripts/test_stage3_cover.py
+
+Мониторинг:
+tail -f /tmp/read_desc.log /tmp/assess.log /tmp/cover.log
+pgrep -f "scripts/<worker>.py"
+
+Создан 29.10.2026. При обновлении — старую версию сохранять как docs/AI7-digest.md.bak-<timestamp>.
