@@ -128,6 +128,8 @@ class Requirement(BaseModel):
     text: str = Field(min_length=1, max_length=500)
     match: float = Field(ge=0.0, le=1.0)
     evidence: str = Field(default="", max_length=500)
+    is_plus: bool = False
+    is_required: bool = False
 
     @field_validator("level", mode="before")
     @classmethod
@@ -163,6 +165,8 @@ class SuitabilityResult(BaseModel):
     verdict: str = Field(min_length=1, max_length=1500)
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     best_resume: str | None = Field(default=None, max_length=10)
+    hard_filter_triggered: bool = False
+    hard_filter_reason: str = ""
 
     @model_validator(mode="before")
     @classmethod
