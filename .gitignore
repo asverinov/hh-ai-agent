@@ -67,3 +67,10 @@ docs/datasets/calibration_reference_*.txt
 data/resumes/
 reports/
 bak/
+
+# Content file (personal, not for public repo)
+prefilter_rules.yaml
+
+# AI9: numbered backups
+*.bak2-*
+*.bak[0-9]-*

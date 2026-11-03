@@ -15,7 +15,7 @@ class ScreenResult(BaseModel):
 
 def extract_hints(title: str, desc: str) -> list[dict]:
     import yaml
-    rules_path = Path("stage0_rules.yaml")
+    rules_path = Path("stage1_hints.yaml")
     if not rules_path.exists():
         return []
     data = yaml.safe_load(rules_path.read_text(encoding="utf-8"))
@@ -52,12 +52,12 @@ def validate_stage2_result(result: SuitabilityResult) -> SuitabilityResult:
     for req in result.requirements:
         is_req = getattr(req, "is_required", False)
         
-        # КОД-СТРАХОВКА: level=1 и match < 0.3 -> принудительно is_required=True
-        if req.level == 1 and req.match < 0.3 and not is_req:
+        # КОД-СТРАХОВКА: level<=2 и match < 0.5 -> принудительно is_required=True
+        if req.level in (1, 2) and req.match < 0.5 and not is_req:
             is_req = True
             req = req.model_copy(update={"is_required": True})
             req_changed = True
-            logger.warning(f"FALLBACK level1_match_below_03 for: {req.text[:50]}")
+            logger.warning(f"FALLBACK level1-2_match_below_05 for: {req.text[:50]}")
             
         new_reqs.append(req)
         
@@ -65,9 +65,11 @@ def validate_stage2_result(result: SuitabilityResult) -> SuitabilityResult:
             hard_reject_reason = f"is_required match={req.match} ({req.text[:50]})"
     
     # 2. Проверяем вердикт (если is_required не сработал)
-    verdict_lower = (result.verdict or "").lower()
-    negative = ["не подаваться", "не подходит", "отказ", "не рекоменд"]
-    verdict_reject = any(m in verdict_lower for m in negative)
+    # AI9-fix: только НАЧАЛО verdict, не вхождение. Иначе «Подаваться... возможен отказ
+    # по overqualified» → false reject.
+    verdict_lower = (result.verdict or "").strip().lower()
+    negative_prefixes = ("не подаваться", "не подходит", "отказ", "не рекоменд")
+    verdict_reject = verdict_lower.startswith(negative_prefixes)
     
     # 3. Формируем итоговые флаги (is_required перебивает вердикт)
     if hard_reject_reason:

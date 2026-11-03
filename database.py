@@ -23,6 +23,7 @@ class VacancyStatus(str, Enum):
     APPLIED = "applied"
     APPLY_FAILED = "apply_failed"
     EXPIRED = "expired"
+    IRRELEVANT = "irrelevant"  # AI9: was in DB, no longer in similar_vacancies (API reconcile)
 
 
 @dataclass(frozen=True)
@@ -110,6 +111,7 @@ ALLOWED_TRANSITIONS = {
         VacancyStatus.PENDING_APPROVAL,
         VacancyStatus.APPLY_FAILED,
         VacancyStatus.EXPIRED,
+        VacancyStatus.IRRELEVANT,
     },
     VacancyStatus.PENDING_APPROVAL: {
         VacancyStatus.APPROVED,
@@ -424,10 +426,11 @@ class Database:
             )
 
     def _migrate_status_check(self, connection: sqlite3.Connection) -> None:
-        """Пересоздать таблицу vacancies если CHECK-ограничение не включает новые статусы.
+        """AI9-fix: пересобрать vacancies при появлении новых VacancyStatus.
 
-        SQLite не позволяет изменить CHECK-ограничение через ALTER TABLE —
-        поэтому при появлении новых значений VacancyStatus нужна полная пересборка таблицы.
+        Раньше: хардкод CREATE TABLE (без queued_at/description/evaluation_json).
+        Теперь: берём реальный CREATE TABLE из sqlite_master, меняем ТОЛЬКО
+        CHECK (status IN (...)), пересоздаём 1-в-1. Все ALTER-колонки сохраняются.
         """
         row = connection.execute(
             "SELECT sql FROM sqlite_master WHERE type='table' AND name='vacancies'"
@@ -438,60 +441,49 @@ class Database:
         missing = [s.value for s in VacancyStatus if f"'{s.value}'" not in table_sql]
         if not missing:
             return
-        import logging as _logging
-        _logging.getLogger(__name__).info(
-            "db_migrate_status_check missing=%s", missing
-        )
-        statuses = ", ".join(f"'{s.value}'" for s in VacancyStatus)
-        connection.execute("ALTER TABLE vacancies RENAME TO _vacancies_old")
-        connection.execute(
-            f"""
-            CREATE TABLE vacancies (
-                id TEXT PRIMARY KEY,
-                title TEXT NOT NULL,
-                salary_from INTEGER,
-                salary_to INTEGER,
-                salary_currency TEXT NOT NULL DEFAULT '',
-                company TEXT NOT NULL DEFAULT '',
-                company_url TEXT NOT NULL DEFAULT '',
-                company_rating REAL,
-                company_reviews_count INTEGER,
-                url TEXT NOT NULL,
-                description_hash TEXT NOT NULL DEFAULT '',
-                search_query TEXT NOT NULL DEFAULT '',
-                llm_decision INTEGER,
-                llm_reason TEXT NOT NULL DEFAULT '',
-                fit_summary TEXT NOT NULL DEFAULT '',
-                confidence REAL,
-                cover_letter TEXT NOT NULL DEFAULT '',
-                status TEXT NOT NULL CHECK (status IN ({statuses})),
-                discovered_at TEXT NOT NULL,
-                approval_requested_at TEXT,
-                approval_expires_at TEXT,
-                approved_at TEXT,
-                applying_at TEXT,
-                submit_attempted_at TEXT,
-                applied_at TEXT,
-                approver_id INTEGER,
-                permit_hash TEXT,
-                error_text TEXT NOT NULL DEFAULT '',
-                analysis_retry_count INTEGER NOT NULL DEFAULT 0,
-                analysis_next_retry_at TEXT
+
+        if connection.execute(
+            "SELECT name FROM sqlite_master WHERE name='_vacancies_old'"
+        ).fetchone():
+            raise RuntimeError(
+                "db_migrate_status_check: _vacancies_old exists — ручное вмешательство"
             )
-            """
+
+        import logging as _logging
+        import re as _re
+        _logging.getLogger(__name__).info("db_migrate_status_check missing=%s", missing)
+
+        new_statuses = ", ".join(f"'{s.value}'" for s in VacancyStatus)
+        new_sql = _re.sub(
+            r"CHECK\s*\(\s*status\s+IN\s*\([^)]*\)\s*\)",
+            f"CHECK (status IN ({new_statuses}))",
+            table_sql,
         )
-        columns = (
-            "id, title, company, url, description_hash, search_query, "
-            "llm_decision, llm_reason, confidence, cover_letter, status, "
-            "discovered_at, approval_requested_at, approval_expires_at, "
-            "approved_at, applied_at, approver_id, permit_hash, error_text, "
-            "applying_at, submit_attempted_at, company_url, company_rating, "
-            "company_reviews_count, fit_summary, analysis_retry_count, analysis_next_retry_at"
-        )
+        if new_sql == table_sql:
+            raise RuntimeError(
+                "db_migrate_status_check: CHECK (status IN ...) не найден"
+            )
+
+        # 1. Drop indexes (иначе конфликт имён после recreate)
+        for idx_row in connection.execute(
+            "SELECT name FROM sqlite_master WHERE type='index' "
+            "AND tbl_name='vacancies' AND name NOT LIKE 'sqlite_%'"
+        ).fetchall():
+            connection.execute(f'DROP INDEX IF EXISTS "{idx_row["name"]}"')
+
+        # 2. Rename + recreate + copy + drop
+        connection.execute("ALTER TABLE vacancies RENAME TO _vacancies_old")
+        connection.execute(new_sql)
+        old_cols = [r[1] for r in connection.execute("PRAGMA table_info(_vacancies_old)")]
+        new_cols = {r[1] for r in connection.execute("PRAGMA table_info(vacancies)")}
+        common = [c for c in old_cols if c in new_cols]
+        cols_str = ", ".join(common)
         connection.execute(
-            f"INSERT INTO vacancies ({columns}) SELECT {columns} FROM _vacancies_old"
+            f"INSERT INTO vacancies ({cols_str}) SELECT {cols_str} FROM _vacancies_old"
         )
         connection.execute("DROP TABLE _vacancies_old")
+
+        # 3. Recreate indexes
         connection.execute(
             "CREATE INDEX IF NOT EXISTS vacancies_status_idx ON vacancies(status)"
         )
@@ -499,10 +491,12 @@ class Database:
             "CREATE INDEX IF NOT EXISTS vacancies_applied_at_idx ON vacancies(applied_at)"
         )
         connection.execute(
-            "CREATE INDEX IF NOT EXISTS idx_queued_read ON vacancies(status, queued_at, description)"
+            "CREATE INDEX IF NOT EXISTS idx_queued_read "
+            "ON vacancies(status, queued_at, description)"
         )
         connection.execute(
-            "CREATE INDEX IF NOT EXISTS idx_queued_apply ON vacancies(queue_priority, queued_at, status)"
+            "CREATE INDEX IF NOT EXISTS idx_queued_apply "
+            "ON vacancies(queue_priority, queued_at, status)"
         )
 
     def dequeue_read(self) -> dict | None:
@@ -650,6 +644,72 @@ class Database:
                     VacancyStatus.REJECTED_BY_LLM.value,
                     verdict,
                     confidence,
+                    evaluation_json,
+                    job_id,
+                    VacancyStatus.DISCOVERED.value,
+                ),
+            )
+            return cursor.rowcount == 1
+
+    def set_evaluation_json(self, job_id: str, evaluation_json: str) -> bool:
+        """AI9: обновить evaluation_json без смены статуса (для backfill/флагов).
+
+        Используется backfill_experience.py: дописать experience_id, prefilter_pass,
+        employment_type_special без изменения status.
+        """
+        with self._connect() as connection:
+            cursor = connection.execute(
+                "UPDATE vacancies SET evaluation_json = ? WHERE id = ?",
+                (evaluation_json, job_id),
+            )
+            return cursor.rowcount == 1
+
+    def mark_irrelevant(
+        self, job_id: str, *, reason: str, evaluation_json: str = ""
+    ) -> bool:
+        """AI9: вакансия больше не в similar_vacancies (API reconcile).
+
+        Не путать с expired: expired = подтверждено браузером (removed/hidden).
+        irrelevant = hh больше не рекомендует, может быть активна.
+        Только для status='discovered' (не трогаем pending — user уже видит).
+        """
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE vacancies
+                SET status = ?, llm_reason = ?,
+                    evaluation_json = ?, queued_at = NULL, error_text = ''
+                WHERE id = ? AND status = ?
+                """,
+                (
+                    VacancyStatus.IRRELEVANT.value,
+                    reason[:300],
+                    evaluation_json,
+                    job_id,
+                    VacancyStatus.DISCOVERED.value,
+                ),
+            )
+            return cursor.rowcount == 1
+
+    def reject_by_filter(
+        self, job_id: str, *, reason: str, evaluation_json: str = ""
+    ) -> bool:
+        """AI9: prefilter reject (excluded_keywords) до LLM. status=rejected_by_filter.
+
+        reason — короткая метка (e.g. "keyword: РКО", "employment: ГПХ").
+        queued_at снимается.
+        """
+        with self._connect() as connection:
+            cursor = connection.execute(
+                """
+                UPDATE vacancies
+                SET status = ?, llm_decision = 0, llm_reason = ?,
+                    evaluation_json = ?, queued_at = NULL, error_text = ''
+                WHERE id = ? AND status = ?
+                """,
+                (
+                    VacancyStatus.REJECTED_BY_FILTER.value,
+                    reason[:300],
                     evaluation_json,
                     job_id,
                     VacancyStatus.DISCOVERED.value,

@@ -408,7 +408,8 @@ async def process_vacancy(
             PageState.VACANCY_LOADED,
         )
 
-    candidates = analyzer.select_resume_stage0(summary.title, details.description)
+    # AI9: select_resume_stage0 удалён. main.py DEPRECATED, fallback на RP.
+    candidates = ["RP"]
     if len(candidates) > 1:
         _stage1_analyzer = _context_analyzer if _context_analyzer is not None else analyzer
         best_resume, reason = await _stage1_analyzer.select_resume_stage1(summary.title, details.description, candidates)

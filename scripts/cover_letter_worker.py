@@ -1,6 +1,6 @@
 """
 cover_letter_worker: берёт discovered с evaluation_json и llm_decision=1 (suitable=true),
-генерирует письмо (AITUNNEL/qwen + ds_cover_letter_digest.md v4.2),
+генерирует письмо (AITUNNEL/qwen + ds_cover_letter_digest.md v4.7 — читается в runtime),
 переводит в pending_approval. Без браузера, без flock — только LLM.
 
 Запуск:
@@ -88,9 +88,10 @@ async def process_one(analyzer, settings, db, row: dict, dry_run: bool) -> str:
 
     best_resume = data.get("best_resume") or ""
     if best_resume not in settings.profile.resumes:
-        # fallback: возьмём первый кандидат Stage 0
-        cands = analyzer.select_resume_stage0(title, desc)
-        best_resume = cands[0] if cands else ""
+        # AI9: fallback на RP (универсал). select_resume_stage0 удалён.
+        # Если None > 5% случаев — баг в assess, разбираем отдельно.
+        log(f"WARNING {vid}: best_resume={best_resume!r} invalid, using RP default")
+        best_resume = "RP"
 
     resume_text = (
         settings.profile.resumes[best_resume].full_text

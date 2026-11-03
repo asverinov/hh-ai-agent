@@ -40,6 +40,7 @@ async def search_one_resume(hh, db, code: str, max_pages: int) -> tuple[int, int
     if not rid:
         log(f"SKIP {code}: нет ID в config/resumes.yaml")
         return 0, 0
+    allowed_exp: set[str] = set(hh.settings.profile.prefilter.experience_allowed)
     page = 0
     new_total = 0
     while True:
@@ -61,28 +62,34 @@ async def search_one_resume(hh, db, code: str, max_pages: int) -> tuple[int, int
             if db.is_seen(vid):
                 continue
                 
+            # 0. Опыт (defense-in-depth: API может вернуть не то или измениться)
+            item_exp = (item.get("experience") or {}).get("id")
+            if allowed_exp and item_exp and item_exp not in allowed_exp:
+                log(f"SKIP_EXPERIENCE {vid} exp={item_exp} allowed={sorted(allowed_exp)}")
+                continue
+
             title = str(item.get("name", ""))
             company = str((item.get("employer") or {}).get("name", ""))
             
             # 1. Junior-тайтлы
-            if marker := _is_junior_title(title, hh.settings.profile.hh.junior_title_markers):
+            if marker := _is_junior_title(title, hh.settings.profile.prefilter.junior_title_markers):
                 log(f"SKIP_JUNIOR {vid} marker={marker}")
                 continue
                 
             # 2. Зарплата (hard_min)
             s_from, s_to, s_cur = _parse_salary(item)
             peek = s_to if s_to is not None else s_from
-            if peek is not None and peek < hh.settings.profile.hh.salary_hard_min:
+            if peek is not None and peek < hh.settings.profile.prefilter.salary_hard_min:
                 log(f"SKIP_SALARY {vid} {s_from}..{s_to} {s_cur}")
                 continue
                 
             # 3. Исключенные позиции
-            if reason := title_rejection_reason(title, hh.settings.profile.candidate.excluded_positions):
+            if reason := title_rejection_reason(title, hh.settings.profile.prefilter.excluded_positions):
                 log(f"SKIP_POSITION {vid} {reason}")
                 continue
                 
             # 4. Исключенные компании
-            if company_match := next((term for term in hh.settings.profile.candidate.excluded_companies if term.casefold() in company.casefold()), None):
+            if company_match := next((term for term in hh.settings.profile.prefilter.excluded_companies if term.casefold() in company.casefold()), None):
                 log(f"SKIP_COMPANY {vid} {company_match}")
                 continue
                 

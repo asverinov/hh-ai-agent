@@ -167,13 +167,17 @@ class SuitabilityResult(BaseModel):
     best_resume: str | None = Field(default=None, max_length=10)
     hard_filter_triggered: bool = False
     hard_filter_reason: str = ""
+    # AI9: overqualified — отдельный флаг, НЕ влияет на suitable/hard_filter.
+    # Код-страховка validate_stage2_result его не трогает (вне requirements[]).
+    overqualified: bool = False
+    overqualified_reason: str = ""
 
     @model_validator(mode="before")
     @classmethod
     def _normalize(cls, data: object) -> object:
         if not isinstance(data, dict):
             return data
-        root_keys = {"suitable", "requirements", "verdict", "confidence", "best_resume"}
+        root_keys = {"suitable", "requirements", "verdict", "confidence", "best_resume", "hard_filter_triggered", "hard_filter_reason", "overqualified", "overqualified_reason"}
         # truncate длинный verdict (mimo иногда возвращает 2000+ символов)
         if isinstance(data.get("verdict"), str) and len(data["verdict"]) > 1497:
             data["verdict"] = data["verdict"][:1497] + "..."
@@ -213,6 +217,15 @@ class SuitabilityResult(BaseModel):
                     data["best_resume"] = None
         else:
             data["best_resume"] = None
+        # AI9: нормализация overqualified (bool) и overqualified_reason (str)
+        oq = data.get("overqualified")
+        if not isinstance(oq, bool):
+            data["overqualified"] = False
+        oqr = data.get("overqualified_reason")
+        if not isinstance(oqr, str):
+            data["overqualified_reason"] = ""
+        else:
+            data["overqualified_reason"] = oqr.strip()[:500]
         return data
 
 
@@ -361,14 +374,6 @@ class VacancyAnalyzer:
             session_id=session_id,
             cache_control=cache_control,
         )
-
-    def select_resume_stage0(self, title: str, description: str) -> list[str]:
-        text = (title + " " + description).lower()
-        candidates = set()
-        for rule in self.settings.profile.stage0_rules:
-            if any(kw.lower() in text for kw in rule.keywords):
-                candidates.update(rule.candidates)
-        return list(candidates) if candidates else ["RP"]
 
     async def select_resume_stage1(self, title: str, description: str, candidates: list[str], *, vacancy_id: str | None = None) -> tuple[str, str]:
         import json as _json

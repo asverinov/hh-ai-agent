@@ -63,7 +63,42 @@ class HHProfile:
         "стажер",
         "интерн",
         "junior",
+        "trainee",
+        "intern",
     )
+
+
+@dataclass(frozen=True)
+class ContextualKeyword:
+    keyword: str
+    context: str
+
+
+@dataclass(frozen=True)
+class EmploymentTypeFilter:
+    patterns: tuple[str, ...]
+    exceptions: tuple[str, ...]
+    note: str = ""
+
+
+@dataclass(frozen=True)
+class PrefilterRules:
+    """AI9: pre-filter rules, extracted from profile.yaml.
+
+    Loaded from prefilter_rules.yaml if exists, else fallback to profile.yaml.
+    Consumers:
+      - search_worker: junior_title_markers, experience_allowed, salary_hard_min,
+                       excluded_positions, excluded_companies (reject before discover)
+      - assess_worker (before Stage 1): excluded_keywords (reject), employment_type_filter (flag only)
+    """
+    junior_title_markers: tuple[str, ...]
+    experience_allowed: tuple[str, ...]
+    salary_hard_min: int
+    excluded_positions: tuple[str, ...]
+    excluded_companies: tuple[str, ...]
+    excluded_keywords: tuple[str, ...]
+    excluded_keywords_contextual: tuple[ContextualKeyword, ...] = ()
+    employment_type_filter: EmploymentTypeFilter | None = None
 
 
 @dataclass(frozen=True)
@@ -99,6 +134,7 @@ class Profile:
     cover_letter: CoverLetterProfile
     resumes: dict[str, ResumeProfile]
     stage0_rules: tuple[Stage0Rule, ...]
+    prefilter: PrefilterRules
 
 
 @dataclass(frozen=True)
@@ -203,6 +239,100 @@ def _bool_value(raw: str | None, default: bool = False) -> bool:
     if raw is None:
         return default
     return str(raw).strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _fallback_prefilter(candidate: CandidateProfile, hh: HHProfile) -> PrefilterRules:
+    """AI9: fallback to profile.yaml values if prefilter_rules.yaml is missing."""
+    from hh_client import _normalize_experience  # lazy import to avoid circular
+    return PrefilterRules(
+        junior_title_markers=hh.junior_title_markers,
+        experience_allowed=tuple(_normalize_experience(hh.experience_filters)),
+        salary_hard_min=hh.salary_hard_min,
+        excluded_positions=candidate.excluded_positions,
+        excluded_companies=candidate.excluded_companies,
+        excluded_keywords=candidate.excluded_keywords,
+        excluded_keywords_contextual=(),
+        employment_type_filter=None,
+    )
+
+
+def _load_prefilter_rules(
+    path: Path,
+    candidate: CandidateProfile,
+    hh: HHProfile,
+    errors: list[str],
+) -> PrefilterRules:
+    """AI9: load prefilter_rules.yaml, fallback to profile.yaml if missing/invalid."""
+    if not path.exists():
+        return _fallback_prefilter(candidate, hh)
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8")) or {}
+    except (OSError, yaml.YAMLError) as exc:
+        errors.append(f"cannot read prefilter_rules.yaml: {exc}")
+        return _fallback_prefilter(candidate, hh)
+    if not isinstance(data, dict):
+        errors.append("prefilter_rules.yaml root must be a mapping")
+        return _fallback_prefilter(candidate, hh)
+
+    def _str_list(key: str) -> tuple[str, ...]:
+        v = data.get(key, [])
+        if not isinstance(v, list):
+            errors.append(f"prefilter_rules.{key} must be a list")
+            return ()
+        return tuple(str(x) for x in v if isinstance(x, str) and x.strip())
+
+    def _int_val(key: str, fallback: int) -> int:
+        v = data.get(key, fallback)
+        if isinstance(v, bool) or not isinstance(v, int) or v < 0:
+            errors.append(f"prefilter_rules.{key} must be a non-negative integer")
+            return fallback
+        return v
+
+    salary = _int_val("salary_hard_min", hh.salary_hard_min)
+
+    contextual: list[ContextualKeyword] = []
+    raw_ctx = data.get("excluded_keywords_contextual", [])
+    if isinstance(raw_ctx, list):
+        for item in raw_ctx:
+            if isinstance(item, dict):
+                kw = str(item.get("keyword", "")).strip()
+                ctx = str(item.get("context", "")).strip()
+                if kw:
+                    contextual.append(ContextualKeyword(keyword=kw, context=ctx))
+
+    et_filter: EmploymentTypeFilter | None = None
+    raw_et = data.get("employment_type_flags")
+    if isinstance(raw_et, dict):
+        patterns = tuple(
+            str(pat) for pat in raw_et.get("patterns", []) if isinstance(pat, str) and pat
+        )
+        exceptions = tuple(
+            str(exc) for exc in raw_et.get("exceptions", []) if isinstance(exc, str) and exc
+        )
+        note = str(raw_et.get("note", "")).strip()
+        if patterns:
+            et_filter = EmploymentTypeFilter(
+                patterns=patterns, exceptions=exceptions, note=note
+            )
+
+    # experience_allowed: yaml uses hh API IDs directly (between3And6, moreThan6)
+    exp_from_yaml = _str_list("experience_allowed")
+    if exp_from_yaml:
+        experience_allowed = exp_from_yaml
+    else:
+        from hh_client import _normalize_experience  # lazy
+        experience_allowed = tuple(_normalize_experience(hh.experience_filters))
+
+    return PrefilterRules(
+        junior_title_markers=_str_list("junior_title_markers") or hh.junior_title_markers,
+        experience_allowed=experience_allowed,
+        salary_hard_min=salary,
+        excluded_positions=_str_list("excluded_positions"),
+        excluded_companies=_str_list("excluded_companies"),
+        excluded_keywords=_str_list("excluded_keywords"),
+        excluded_keywords_contextual=tuple(contextual),
+        employment_type_filter=et_filter,
+    )
 
 
 def load_settings(
@@ -592,6 +722,8 @@ def load_settings(
         hh = HHProfile("", (), (), ())
         cover_letter = CoverLetterProfile("ru", 1800, "professional")
 
+    prefilter = _load_prefilter_rules(BASE_DIR / "prefilter_rules.yaml", candidate, hh, errors)
+
     if not candidate.name:
         errors.append("candidate.name is required")
     if not candidate.desired_positions:
@@ -685,7 +817,7 @@ def load_settings(
         circuit_breaker_page_errors=positive_integer(
             "CIRCUIT_BREAKER_PAGE_ERRORS", "3"
         ),
-        profile=Profile(candidate, hh, cover_letter, parsed_resumes, tuple(parsed_rules)),
+        profile=Profile(candidate, hh, cover_letter, parsed_resumes, tuple(parsed_rules), prefilter),
         hh_access_token=values.get("HH_ACCESS_TOKEN", "").strip(),
         hh_refresh_token=values.get("HH_REFRESH_TOKEN", "").strip(),
         hh_token_expires_at=_hh_token_expires_at,

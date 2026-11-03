@@ -52,11 +52,8 @@ def build_fit_summary(suitability, best_resume):
 
 async def process_one(analyzer, settings, db, vid, title, desc, company, dry_run):
     try:
-        candidates = analyzer.select_resume_stage0(title, desc)
-        if len(candidates) > 1:
-            best_resume, reason = await analyzer.select_resume_stage1(title, desc, candidates)
-        else:
-            best_resume, reason = candidates[0], "Stage 0 (single)"
+        # AI9: select_resume_stage0 удалён. DEPRECATED скрипт, fallback на RP.
+        best_resume, reason = "RP", "fallback (select_resume_stage0 removed)"
         resume_text = settings.profile.resumes[best_resume].full_text if best_resume in settings.profile.resumes else ""
 
         digest = ASSESS_DIGEST.read_text(encoding="utf-8") if ASSESS_DIGEST.exists() else None

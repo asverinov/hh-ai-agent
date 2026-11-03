@@ -60,7 +60,8 @@ def build_fit_summary(suitability, best_resume):
 async def run_cascade(analyzer, settings, vid, title, desc, company, dry_run, db):
     """Возвращает (best_resume, conf, letter_len, suitable, err_or_None)."""
     try:
-        candidates = analyzer.select_resume_stage0(title, desc)
+        # AI9: select_resume_stage0 удалён. DEPRECATED скрипт, fallback на RP.
+        candidates = ["RP"]
         if len(candidates) > 1:
             best_resume, reason = await analyzer.select_resume_stage1(title, desc, candidates)
         else:
