@@ -114,6 +114,7 @@ def test_completion_records_only_usage_metadata(tmp_path: Path) -> None:
         "vacancy_id": None,
         "prompt_version": "",
         "raw_response": None,
+        "cached_tokens": 0,
     }
 
 

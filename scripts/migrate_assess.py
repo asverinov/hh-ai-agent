@@ -18,7 +18,7 @@ STOP_AFTER_MIN = 50                # mismatch проверять только п
 STOP_ERROR_PCT_MAX = 5.0           # API/LLM infra errors (timeout/429/5xx) > этого -> стоп
 STOP_INVALID_PCT_MAX = 3.0         # invalid_response (empty+invalid_json) > этого -> стоп
 STOP_MISMATCH_PCT_MAX = 3.0        # suitable=true + 'не подаваться' > этого (после 50) -> стоп
-STOP_TIMESLOW_FACTOR = 2.0         # avg_last_20 > N × avg_first_20 -> стоп
+STOP_TIMESLOW_FACTOR = 99.0        # AI9-fix: отключено (Stage 1 vs Stage 2 разное время — ложный сигнал)
 STOP_BASELINE_WARMUP = 40          # первые N — прогрев, потом baseline
 
 
@@ -227,6 +227,18 @@ async def main():
         print(f"   Проверь /tmp/migrate_assess.log и реши: чинить или откатывать.")
     else:
         print(f"\n=== Миграция завершена. Результаты в {out_file} ===")
+
+    # AI9-fix: закрыть aiohttp-сессию провайдера (Unclosed client session)
+    try:
+        adapter_obj = getattr(provider, "adapter", None) or provider
+        close_method = getattr(adapter_obj, "close", None)
+        if close_method is not None:
+            result = close_method()
+            if hasattr(result, "__await__"):
+                await result
+            print("provider closed")
+    except Exception as e:
+        print(f"WARN: provider close failed: {e}")
 
 
 if __name__ == "__main__":

@@ -207,11 +207,7 @@ class Database:
                 "CREATE INDEX IF NOT EXISTS read_errors_created_idx "
                 "ON read_errors(created_at)"
             )
-            _cols = {row[1] for row in connection.execute("PRAGMA table_info(vacancies)")}
-            if "read_error_count" not in _cols:
-                connection.execute(
-                    "ALTER TABLE vacancies ADD COLUMN read_error_count INTEGER NOT NULL DEFAULT 0"
-                )
+            # AI9-fix: read_error_count ALTER перенесён в _ensure_columns (после CREATE TABLE).
             connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS evaluations (
@@ -310,7 +306,8 @@ class Database:
                     output_tokens INTEGER,
                     latency_ms INTEGER,
                     provider_request_id TEXT,
-                    error_type TEXT NOT NULL DEFAULT ''
+                    error_type TEXT NOT NULL DEFAULT '',
+                    cached_tokens INTEGER NOT NULL DEFAULT 0
                 )
                 """
             )
@@ -393,6 +390,7 @@ class Database:
                 "description": "TEXT NOT NULL DEFAULT ''",
                 "queued_at": "TEXT",
                 "queue_priority": "INTEGER DEFAULT 0",
+                "read_error_count": "INTEGER NOT NULL DEFAULT 0",
             }
             for name, definition in migrations.items():
                 if name not in columns:
@@ -406,6 +404,7 @@ class Database:
                 "vacancy_id": "TEXT",
                 "raw_response": "TEXT",
                 "prompt_version": "TEXT NOT NULL DEFAULT ''",
+                "cached_tokens": "INTEGER NOT NULL DEFAULT 0",
             }
             for name, definition in llm_migrations.items():
                 if name not in llm_columns:

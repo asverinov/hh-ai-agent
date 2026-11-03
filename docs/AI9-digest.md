@@ -78,6 +78,32 @@
 
 ---
 
+## 3.5. ТЕСТЫ (AI9)
+
+### Сделано
+- **`tests/test_ai9_fixes.py`** (20 passed) — smoke-тесты фиксов AI9:
+  - `verdict_reject` через `startswith` (5 кейсов).
+  - `check_prefilter` word boundary для коротких аббревиатур (8 кейсов).
+  - `overqualified` через `_normalize` + `validate_stage2_result` не трогает (3 кейса).
+  - `PrefilterRules` из yaml + fallback (2 кейса).
+  - `Database.init()` на чистой БД: колонки `read_error_count`, `cached_tokens`, `irrelevant` в CHECK (2 кейса).
+- **`tests/test_llm_database.py`** — починен (5 passed): `+cached_tokens` в expected dict (не обновляли после AI5).
+- **`database.init()`** — 2 бага исправлены:
+  - `read_error_count` ALTER до `CREATE TABLE vacancies` → перенесён в `_ensure_columns`.
+  - `cached_tokens` отсутствовал в `CREATE TABLE llm_requests` → добавлен в CREATE + `llm_migrations`.
+
+### Осталось (отдельная сессия, 2-3 дня)
+`pytest tests/` → **311 passed, 66 failed** (старые тесты Sep 28 – Oct 15, не наши):
+- `test_main.py` (12+) — тестирует DEPRECATED `main.py`.
+- `test_hh_client.py` (8) — `classify_page` менялся в AI8 (`count()>0` вместо `is_visible()`).
+- `test_llm_cli.py` (6) — Mistral → AITUNNEL, тесты не обновлены.
+- `test_ai_analyzer.py` — `reason=` в старой модели, сейчас `verdict=`.
+- `test_approval.py`, `test_database.py` — частично.
+
+**Не блокер** для миграции и писем. Починить — отдельная итерация.
+
+---
+
 ## 4. КОМАНДЫ (для следующей сессии)
 
 **Миграция (если не запущена):**
