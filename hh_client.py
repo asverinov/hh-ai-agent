@@ -66,6 +66,14 @@ class PageState(str, Enum):
 
 
 @dataclass(frozen=True)
+class CaptchaDetectedError(RuntimeError):
+    """hh.ru показал капчу — нужен VNC, стоп."""
+
+
+class VacancyExpiredError(RuntimeError):
+    """Вакансия закрыта/скрыта — пропускаем."""
+
+
 class VacancySummary:
     id: str
     title: str
@@ -379,6 +387,8 @@ class HHClient:
         page: int,
         per_page: int = 100,
     ) -> dict[str, Any]:
+        if not await self._refresh_token_if_needed():
+            raise RuntimeError("hh_token_refresh_failed_before_similar")
         session = await self._get_http_session()
         url = f"https://api.hh.ru/resumes/{resume_id}/similar_vacancies"
         headers = {"Authorization": f"Bearer {self._access_token}"}
@@ -896,7 +906,12 @@ class HHClient:
         try:
             page = await self.context.new_page()
             await self._delay()
-            await page.goto(summary.url, wait_until="domcontentloaded", timeout=30_000)
+            _url = summary.url
+            if "?" not in _url:
+                _url += "?from=similar_vacancies"
+            else:
+                _url += "&from=similar_vacancies"
+            await page.goto(_url, wait_until="domcontentloaded", timeout=30_000)
             state = await classify_page(page)
             if state is PageState.CAPTCHA_DETECTED and captcha_solver is not None:
                 state = await self._solve_captcha(page, summary, captcha_solver)
@@ -1038,6 +1053,12 @@ class HHClient:
             page = await self.context.new_page()
             await self._delay()
             await page.goto(vacancy.url, wait_until="domcontentloaded", timeout=30_000)
+
+            _state = await classify_page(page)
+            if _state == PageState.CAPTCHA_DETECTED:
+                raise CaptchaDetectedError(f"captcha job_id={permission.job_id}")
+            if _state in (PageState.VACANCY_REMOVED, PageState.VACANCY_HIDDEN):
+                raise VacancyExpiredError(f"vacancy {_state.value} job_id={permission.job_id}")
 
             # Check if user is unauthenticated
             if await page.locator('input[type="tel"], a[data-qa="mainmenu_applicantAccess"]:has-text("Войти")').first.is_visible():

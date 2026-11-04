@@ -53,21 +53,30 @@ def _quick_stop_check(db) -> str | None:
 
 async def main():
     settings = load_settings()
+
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--statuses", default="discovered",
+                    help="CSV статусов: discovered, pending_approval, rejected_by_llm")
+    args = ap.parse_args()
+
     db = Database(str(settings.database_path))
     
     # Берем вакансии, которые ждут оценки, ИЛИ pending, которых надо переоценить
     with db._connect() as c:
-        rows = c.execute("""
-            SELECT id, title, description FROM vacancies 
-            WHERE (status='discovered' AND description!='')
+        statuses = [s.strip() for s in args.statuses.split(",") if s.strip()]
+        ph = ",".join("?" * len(statuses))
+        rows = c.execute(f"""
+            SELECT id, title, description FROM vacancies
+            WHERE status IN ({ph}) AND description != '' AND description IS NOT NULL
             ORDER BY id
-        """).fetchall()
+        """, statuses).fetchall()
     
     if not rows:
         print("Нет вакансий для миграции.")
         return
 
-    print(f"Найдено {len(rows)} вакансий для миграции (discovered + pending).")
+    print(f"Найдено {len(rows)} вакансий для миграции (statuses={args.statuses}).")
     
     # Сбрасываем им статус и старую оценку, чтобы они корректно перезаписались
     with db._connect() as c:

@@ -74,3 +74,7 @@ prefilter_rules.yaml
 # AI9: numbered backups
 *.bak2-*
 *.bak[0-9]-*
+# Content files (personal, not for public repo) — AI10
+docs/datasets/assess*.md
+docs/datasets/ds_cover_letter_digest.md
+!docs/datasets/*.example.md

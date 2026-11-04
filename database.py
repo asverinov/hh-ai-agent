@@ -520,6 +520,96 @@ class Database:
             ).fetchone()
             return dict(row) if row else None
 
+    def enqueue_apply(self, vacancy_id: str) -> bool:
+        """Поставить вакансию в очередь на отклик (queue_priority=1).
+
+        Только для pending_approval с непустым cover_letter.
+        """
+        with self._connect() as connection:
+            cur = connection.execute(
+                """
+                UPDATE vacancies
+                SET queue_priority = 1, queued_at = datetime('now')
+                WHERE id = ? AND status = ?
+                  AND cover_letter IS NOT NULL AND cover_letter != ''
+                """,
+                (vacancy_id, VacancyStatus.PENDING_APPROVAL.value),
+            )
+            return cur.rowcount > 0
+
+    def dequeue_apply(self) -> dict | None:
+        """Атомарно взять одну pending_approval из очереди (queue_priority>=1).
+
+        Lease: queued_at = now + 10 мин. Если browser_worker упадёт — вернётся сама.
+        """
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                UPDATE vacancies SET queued_at = datetime('now', '+10 minutes')
+                WHERE id = (
+                    SELECT id FROM vacancies
+                    WHERE status = ? AND queue_priority >= 1
+                      AND (queued_at IS NULL OR queued_at <= datetime('now'))
+                    ORDER BY queued_at, id
+                    LIMIT 1
+                )
+                RETURNING id, title, url, cover_letter
+                """,
+                (VacancyStatus.PENDING_APPROVAL.value,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def defer_apply_queue(self, vacancy_id: str, minutes: int) -> bool:
+        """Отложить apply на N минут (вернуть в pending_approval из любого статуса)."""
+        with self._connect() as connection:
+            cur = connection.execute(
+                """
+                UPDATE vacancies
+                SET status = ?, queued_at = datetime('now', ? || ' minutes')
+                WHERE id = ? AND status IN (?, ?, ?, ?)
+                """,
+                (VacancyStatus.PENDING_APPROVAL.value, f"+{int(minutes)}",
+                 vacancy_id,
+                 VacancyStatus.PENDING_APPROVAL.value,
+                 VacancyStatus.APPROVED.value,
+                 VacancyStatus.APPLYING.value,
+                 VacancyStatus.APPLY_FAILED.value),
+            )
+            return cur.rowcount > 0
+
+    def count_apply_queue(self) -> int:
+        """Сколько в очереди на apply (для TG-ответа «N-я в очереди»)."""
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT COUNT(*) FROM vacancies
+                WHERE status = ? AND queue_priority >= 1
+                """,
+                (VacancyStatus.PENDING_APPROVAL.value,),
+            ).fetchone()
+            return int(row[0]) if row else 0
+
+    def get_last_apply_at(self) -> str | None:
+        """Последний apply (ISO datetime) — rate-limit в БД (переживает рестарт)."""
+        with self._connect() as connection:
+            row = connection.execute(
+                """
+                SELECT MAX(applied_at) FROM vacancies
+                WHERE status IN (?, ?, ?) AND applied_at IS NOT NULL
+                """,
+                (VacancyStatus.APPLIED.value, VacancyStatus.APPLYING.value,
+                 VacancyStatus.APPLY_FAILED.value),
+            ).fetchone()
+            return str(row[0]) if row and row[0] else None
+
+    def set_last_apply_at(self, iso_now: str) -> None:
+        """Не нужен отдельный столбец: applied_at пишется в complete_apply.
+
+        Метод оставлен для симметрии API (no-op), rate-limit читается из vacancies.applied_at.
+        """
+        # No-op: complete_apply() обновляет applied_at автоматически.
+        return
+
     def log_read_error(
         self,
         *,
@@ -662,6 +752,16 @@ class Database:
                 (evaluation_json, job_id),
             )
             return cursor.rowcount == 1
+
+    def mark_expired(self, vacancy_id: str) -> bool:
+        """Пометить вакансию как expired (закрыта на hh.ru)."""
+        with self._connect() as connection:
+            cur = connection.execute(
+                "UPDATE vacancies SET status = ?, queued_at = NULL WHERE id = ? AND status IN (?, ?)",
+                (VacancyStatus.EXPIRED.value, vacancy_id,
+                 VacancyStatus.PENDING_APPROVAL.value, VacancyStatus.APPLYING.value),
+            )
+            return cur.rowcount > 0
 
     def mark_irrelevant(
         self, job_id: str, *, reason: str, evaluation_json: str = ""

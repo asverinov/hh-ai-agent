@@ -86,6 +86,17 @@ def validate_stage2_result(result: SuitabilityResult) -> SuitabilityResult:
             update_data["hard_filter_reason"] = "post-process: verdict says 'не подаваться'"
             logger.warning(f"HARD REJECT (verdict): {update_data['hard_filter_reason']}")
 
+    # AI10-fix: модель может вернуть suitable=True + hard_filter_triggered=True.
+    # Если hard_filter стоит (свой или модельный) — suitable обязан быть False.
+    _hf = update_data.get("hard_filter_triggered") or getattr(result, "hard_filter_triggered", False)
+    if _hf and result.suitable:
+        update_data["suitable"] = False
+        if "hard_filter_reason" not in update_data:
+            update_data["hard_filter_reason"] = (
+                getattr(result, "hard_filter_reason", "") or "model hf=True, suitable forced False"
+            )
+        logger.warning("HARD REJECT (hf=True): suitable was True, forced to False")
+
     if req_changed:
         update_data["requirements"] = new_reqs
         

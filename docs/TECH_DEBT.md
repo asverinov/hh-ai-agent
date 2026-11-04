@@ -6,6 +6,18 @@
 
 ---
 
+## 🟡 Шаблоны контентных файлов (после финализации промптов)
+
+**Проблема:** контентные файлы (`assess*.md`, `ds_*.md`, `stage1_hints.yaml`, `prompts.json`, `calibration_set.json`) выведены из git (AI10, `.gitignore`). Для публичного репо нужны обезличенные шаблоны.
+
+**Что сделать:** на основе рабочих вариантов — `assess1.example.md`, `assess2.example.md`, `ds_cover_letter_digest.example.md`, `stage1_hints.example.yaml`, `prefilter_rules.example.yaml`, `profile.example.yaml`, `resumes.example.yaml`. Без персональных данных, только структура + правила + примеры.
+
+**Когда:** после финализации промптов (сейчас v1.7/v1.8 в работе). До этого — не имеет смысла.
+
+**Статус:** не начато.
+
+---
+
 ## 🔴 Высокий приоритет (следующий шаг)
 
 1. **`apply_worker.py`** — не сделан. Берет `pending_approval` с `queue_priority=1`, делает `submit_application` через CloakBrowser (flock + `.browser-apply-pending`). Сейчас apply — вручную через TG-карточку. **Единая очередь с `read_description`** (один браузер): приоритет apply выше read, rate limit 5 мин на уровне БД.

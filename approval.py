@@ -44,6 +44,14 @@ class ApprovalGuard:
         self.now_factory = now_factory or (lambda: datetime.now().astimezone())
         self._apply_cooldown_seconds = 300
         self._last_apply_at = None
+        # AI10: rate-limit переживает рестарт — читаем из vacancies.applied_at
+        try:
+            _last = self.database.get_last_apply_at()
+            if _last:
+                from datetime import datetime as _dt
+                self._last_apply_at = _dt.fromisoformat(_last)
+        except Exception as _e:
+            logger.warning("last_apply_at_load_failed err=%s", _e)
         self._apply_lock = asyncio.Lock()
 
     def claim(self, permission: ApplicationPermission) -> ClaimResult:

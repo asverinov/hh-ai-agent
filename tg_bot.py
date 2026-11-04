@@ -284,60 +284,25 @@ class TelegramService:
                     logger.debug("stale_card_markup_clear_failed error=%s", exc)
             return
         if action == "apply":
-            # Отвечаем на callback немедленно — Telegram требует ответ в течение ~10 сек,
-            # а браузерный отклик может занять значительно больше времени.
-            await callback.answer("⏳ Отправляем отклик...", show_alert=False)
-            result = await self.approval_service.approve_and_apply(
-                job_id, callback.from_user.id
-            )
-            vacancy = self.database.get(job_id)
-            if result.ok:
-                if is_pesec_enabled():
-                    pesec_img = get_pesec_image("applied")
-                    if pesec_img and pesec_img.exists():
-                        try:
-                            await self.bot.send_photo(
-                                chat_id=self.settings.tg_user_id,
-                                photo=FSInputFile(pesec_img),
-                                caption="🐾 Отклик успешно улетел работодателю!",
-                            )
-                        except Exception as exc:
-                            logger.debug("pesec_applied_failed error=%s", exc)
-                _title = vacancy.title if vacancy else job_id
-                _msg = f"✓ Отклик отправлен: {_title}"
-                if callback.message:
-                    try:
-                        await callback.message.reply(_msg)
-                    except Exception:
-                        await self.notify(_msg)
-                else:
-                    await self.notify(_msg)
-                if callback.message:
+            ok = self.database.enqueue_apply(job_id)
+            if not ok:
+                await callback.answer(
+                    "❌ Нельзя в очередь: нет письма или вакансия уже не pending.",
+                    show_alert=True,
+                )
+                return
+            queue_n = self.database.count_apply_queue()
+            await callback.answer(f"✅ В очереди: {queue_n}-я", show_alert=False)
+            if callback.message:
+                try:
+                    await callback.message.reply(
+                        f"🕐 Отклик в очереди (позиция {queue_n}). "
+                        f"Результат пришлю отдельным сообщением."
+                    )
                     await callback.message.edit_reply_markup(reply_markup=None)
-            else:
-                if not result.ok:
-                    title_txt = vacancy.title if vacancy else job_id
-                    reason = (result.message or "").strip() or "\u043d\u0435\u0438\u0437\u0432\u0435\u0441\u0442\u043d\u0430\u044f \u043f\u0440\u0438\u0447\u0438\u043d\u0430"
-                    try:
-                        await self.notify(
-                            f"\u2717 \u041e\u0442\u043a\u043b\u0438\u043a \u043d\u0435 \u043e\u0442\u043f\u0440\u0430\u0432\u043b\u0435\u043d: {title_txt}. \u041f\u0440\u0438\u0447\u0438\u043d\u0430: {reason}"
-                        )
-                    except Exception as exc:
-                        logger.warning("notify_apply_failure_failed job_id=%s error=%s", job_id, exc)
-                if vacancy and vacancy.error_text == "questionnaire_required":
-                    await self.notify_questionnaire_required(vacancy.title, vacancy.url)
-                    if callback.message:
-                        await callback.message.edit_reply_markup(reply_markup=None)
-                else:
-                    _title = vacancy.title if vacancy else job_id
-                    _msg = f"✗ {_title}: {result.message}"
-                    if callback.message:
-                        try:
-                            await callback.message.reply(_msg)
-                        except Exception:
-                            await self.notify(_msg)
-                    else:
-                        await self.notify(_msg)
+                except Exception as exc:
+                    logger.debug("apply_reply_failed err=%s", exc)
+            return
         elif action == "edit":
             self._mistral_key_input = None
             await callback.answer("Пришлите новый текст сопроводительного письма сообщением (или /cancel):", show_alert=True)

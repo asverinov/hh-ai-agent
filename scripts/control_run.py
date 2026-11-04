@@ -151,29 +151,44 @@ async def main() -> None:
                     help="CSV дат (YYYY-MM-DD), фильтр discovered_at. Пусто = все с description")
     ap.add_argument("--include-no-desc", action="store_true",
                     help="Включить discovered без description (НЕ рекомендуется)")
+    ap.add_argument("--ids", default="",
+                    help="CSV ID — прогнать именно их, независимо от статуса. Пишет в control_run_v16.jsonl")
+    ap.add_argument("--append", action="store_true",
+                    help="Не очищать control_run_v16.jsonl (для повторного прогона missing)")
     args = ap.parse_args()
 
     settings = load_settings()
     db = Database(str(settings.database_path))
     db.init()
 
-    where = ["status='discovered'"]
-    if not args.include_no_desc:
-        where.append("description != ''")
-    params: list = []
-    if args.dates:
-        dates = [d.strip() for d in args.dates.split(",") if d.strip()]
-        ph = ",".join("?" * len(dates))
-        where.append(f"substr(discovered_at,1,10) IN ({ph})")
-        params.extend(dates)
-    sql = f"""
-        SELECT id, title, description, discovered_at, evaluation_json
-        FROM vacancies
-        WHERE {' AND '.join(where)}
-        ORDER BY discovered_at DESC, id DESC
-        LIMIT ?
-    """
-    params.append(args.limit)
+    if args.ids:
+        id_list = [i.strip() for i in args.ids.split(",") if i.strip()]
+        ph = ",".join("?" * len(id_list))
+        sql = f"""
+            SELECT id, title, description, discovered_at, evaluation_json
+            FROM vacancies
+            WHERE id IN ({ph})
+            ORDER BY id DESC
+        """
+        params = id_list
+    else:
+        where = ["status='discovered'"]
+        if not args.include_no_desc:
+            where.append("description != ''")
+        params = []
+        if args.dates:
+            dates = [d.strip() for d in args.dates.split(",") if d.strip()]
+            ph = ",".join("?" * len(dates))
+            where.append(f"substr(discovered_at,1,10) IN ({ph})")
+            params.extend(dates)
+        sql = f"""
+            SELECT id, title, description, discovered_at, evaluation_json
+            FROM vacancies
+            WHERE {' AND '.join(where)}
+            ORDER BY discovered_at DESC, id DESC
+            LIMIT ?
+        """
+        params.append(args.limit)
     with db._connect() as c:
         rows = [dict(r) for r in c.execute(sql, params).fetchall()]
 
@@ -202,13 +217,26 @@ async def main() -> None:
     provider = ManagedLLMProvider(adapter, db, max_retries=1, max_requests_per_day=2000)
     analyzer = VacancyAnalyzer(settings, provider)
 
+    global REPORT_JSONL
+    if args.ids:
+        REPORT_JSONL = Path("reports/control_run_v16.jsonl")
     REPORT_JSONL.parent.mkdir(parents=True, exist_ok=True)
-    REPORT_JSONL.write_text("", encoding="utf-8")
+    if not getattr(args, "append", False):
+        REPORT_JSONL.write_text("", encoding="utf-8")
 
     results: list[dict] = []
     for idx, row in enumerate(rows, 1):
         log(f"[{idx}/{len(rows)}] {row['id']} {row['title'][:50]}...")
-        rec = await run_one(analyzer, settings, row)
+        try:
+            rec = await run_one(analyzer, settings, row)
+        except Exception as e:
+            err_type = type(e).__name__
+            log(f"  ❌ {err_type}: {str(e)[:200]}")
+            rec = {"id": str(row["id"]), "title": row.get("title", ""),
+                   "stage": "error", "action": "error", "suitable": None,
+                   "reason": f"{err_type}: {str(e)[:150]}",
+                   "hard_filter_triggered": None, "overqualified": None,
+                   "verdict": ""}
         write_record(rec)
         results.append(rec)
         log(f"  stage={rec['stage']} action={rec['action']} "

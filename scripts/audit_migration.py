@@ -1,66 +1,88 @@
-import json
-import sqlite3
+#!/usr/bin/env python3
+"""audit_migration.py — сэмплы для Эксперта (JSONL + DB Stage 1)."""
+import json, sqlite3
 from pathlib import Path
 from config import load_settings
 
-def main():
-    db_path = str(load_settings().database_path)
-    conn = sqlite3.connect(db_path)
-    conn.row_factory = sqlite3.Row
+JSONL = Path("reports/migration_results.jsonl")
+OUT = Path("reports/migration_audit_for_expert.md")
 
-    rows = conn.execute("""
-        SELECT id, title, llm_decision, llm_reason, evaluation_json
-        FROM vacancies 
-        WHERE status IN ('pending_approval', 'rejected_by_llm') AND llm_reason != ''
+def short_reqs(stage2, top=3):
+    reqs = (stage2 or {}).get("requirements") or []
+    lines = []
+    for r in [x for x in reqs if x.get("level") == 1][:top]:
+        lines.append(f"  - L1 `{(r.get('text') or '')[:70]}` -> match={r.get('match')} is_required={r.get('is_required')}")
+    return "\n".join(lines)
+
+def main():
+    if not JSONL.exists():
+        print(f"НЕТ {JSONL}"); return
+    records = []
+    for line in JSONL.open(encoding="utf-8"):
+        line = line.strip()
+        if not line: continue
+        try: records.append(json.loads(line))
+        except: pass
+
+    true_sample = [r for r in records if (r.get("stage2") or {}).get("suitable") is True][:20]
+    false_sample = [r for r in records if (r.get("stage2") or {}).get("suitable") is False][:10]
+    post_cases = [r for r in records if "post-process" in ((r.get("stage2") or {}).get("hard_filter_reason") or "")]
+
+    conn = sqlite3.connect(str(load_settings().database_path))
+    conn.row_factory = sqlite3.Row
+    stage1_rows = conn.execute("""
+        SELECT id, title, llm_reason, evaluation_json FROM vacancies
+        WHERE status='rejected_by_llm' AND evaluation_json LIKE '%"stage": 1%'
+        ORDER BY id DESC LIMIT 10
     """).fetchall()
 
-    true_sample = []
-    false_sample = []
-    post_process_cases = []
+    with OUT.open("w", encoding="utf-8") as f:
+        f.write("# Аудит миграции AI9 — сэмплы\n\n")
+        f.write(f"- JSONL: **{len(records)}** записей\n")
+        f.write(f"- true_sample: **{len(true_sample)}**\n")
+        f.write(f"- false_sample: **{len(false_sample)}**\n")
+        f.write(f"- post-process: **{len(post_cases)}**\n")
+        f.write(f"- Stage 1 reject sample: **{len(stage1_rows)}**\n\n")
 
-    for r in rows:
-        if not r['evaluation_json']: continue
-        ej = json.loads(r['evaluation_json'])
-        
-        reason = ej.get('hard_filter_reason', '')
-        if 'post-process: verdict' in reason:
-            post_process_cases.append(r['id'])
-
-        if r['llm_decision'] == 1 and len(true_sample) < 20:
-            true_sample.append(r)
-        elif r['llm_decision'] == 0 and 'is_required match=' in reason and len(false_sample) < 10:
-            false_sample.append(r)
-
-    out = Path("reports/migration_audit_for_expert.md")
-    with out.open("w", encoding="utf-8") as f:
-        f.write("# Аудит миграции (сэмплы)\n\n")
-        
-        f.write("## 1. Sample 20 suitable=true\n\n")
+        f.write(f"## 1. suitable=true (20 из JSONL)\n\n")
         for r in true_sample:
-            ej = json.loads(r['evaluation_json'])
-            f.write(f"### {r['id']} | {r['title']}\n")
-            f.write(f"- best_resume: {ej.get('best_resume')}\n")
-            f.write(f"- verdict: {ej.get('verdict')}\n")
-            reqs = ej.get('requirements', [])
-            top_reqs = [x for x in reqs if x.get('level') == 1][:3]
+            s2 = r.get("stage2") or {}
+            f.write(f"### {r['id']} | {r.get('title','')}\n")
+            f.write(f"- url: {r.get('url','')}\n")
+            f.write(f"- best_resume: {s2.get('best_resume')}\n")
+            f.write(f"- confidence: {s2.get('confidence')}\n")
+            f.write(f"- verdict: {(s2.get('verdict') or '')[:300]}\n")
             f.write("- top-3 L1 reqs:\n")
-            for tr in top_reqs:
-                f.write(f"  - {tr.get('text')[:50]} -> {tr.get('match')}\n")
-            f.write("\n")
+            f.write(short_reqs(s2) + "\n\n")
 
-        f.write("## 2. Sample 10 suitable=false (через is_required)\n\n")
+        f.write(f"## 2. suitable=false с hard_filter (10 из JSONL)\n\n")
         for r in false_sample:
-            ej = json.loads(r['evaluation_json'])
-            f.write(f"### {r['id']} | {r['title']}\n")
-            f.write(f"- reason: {ej.get('hard_filter_reason')}\n")
-            f.write(f"- verdict: {ej.get('verdict')}\n\n")
+            s2 = r.get("stage2") or {}
+            f.write(f"### {r['id']} | {r.get('title','')}\n")
+            f.write(f"- url: {r.get('url','')}\n")
+            f.write(f"- best_resume: {s2.get('best_resume')}\n")
+            f.write(f"- hard_filter_reason: {s2.get('hard_filter_reason')}\n")
+            f.write(f"- verdict: {(s2.get('verdict') or '')[:300]}\n")
+            f.write("- top-3 L1 reqs:\n")
+            f.write(short_reqs(s2) + "\n\n")
 
-        f.write("## 3. Все случаи post-process: verdict\n\n")
-        f.write(f"Всего: {len(post_process_cases)}\n\n")
-        for pid in post_process_cases:
-            f.write(f"- {pid}\n")
+        f.write(f"## 3. Post-process cases (verdict)\n\n")
+        f.write(f"Всего: **{len(post_cases)}**\n\n")
+        for r in post_cases:
+            s2 = r.get("stage2") or {}
+            f.write(f"- {r['id']} | {r.get('title','')} | reason: {s2.get('hard_filter_reason')}\n")
 
-    print(f"✅ Аудит сохранен: {out}")
+        f.write(f"\n## 4. Stage 1 reject (10 из БД)\n\n")
+        for row in stage1_rows:
+            ej = json.loads(row["evaluation_json"]) if row["evaluation_json"] else {}
+            f.write(f"### {row['id']} | {row['title']}\n")
+            f.write(f"- llm_reason: {(row['llm_reason'] or '')[:300]}\n")
+            f.write(f"- stage1.best_resume: {ej.get('best_resume')}\n")
+            f.write(f"- stage1.confidence: {ej.get('confidence')}\n")
+            f.write(f"- stage1.verdict: {(ej.get('verdict') or '')[:300]}\n\n")
+
+    print(f"OK: {OUT}")
+    print(f"true={len(true_sample)}, false={len(false_sample)}, post={len(post_cases)}, stage1={len(stage1_rows)}")
 
 if __name__ == "__main__":
     main()
