@@ -77,4 +77,9 @@ prefilter_rules.yaml
 # Content files (personal, not for public repo) — AI10
 docs/datasets/assess*.md
 docs/datasets/ds_cover_letter_digest.md
+docs/datasets/ds_*.md
+docs/datasets/prompts.json
+docs/datasets/calibration_set.json
+docs/datasets/cover_letter_models_test_*.md
+stage1_hints.yaml
 !docs/datasets/*.example.md
