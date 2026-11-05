@@ -41,15 +41,15 @@ DATA FLOW (воркеры, не pipeline), `main.py` (DEPRECATED), `stage0_rules
     browser_worker.py (AI10: единый браузерный, apply+read):
        ├─ dequeue_apply (приоритет) -> hh_client.submit_application
        │  ├─ модалка hh.ru + _get_resume_id(best_resume) + textarea + submit
-       │  ├─ CAPTCHA_DETECTED -> STOP (VNC)
+       │  ├─ после submit: проверка капчи (1.5 сек) → есть: /tmp/captcha_apply_<id>.png + STOP (VNC)
+       │  ├─ CAPTCHA_DETECTED (до submit) -> STOP (VNC)
        │  ├─ VACANCY_REMOVED/HIDDEN -> mark_expired
        │  ├─ questionnaire_required -> mark_skipped_by_id
-       │  ├─ pre_response_recheck -> skip (не error)
+       │  ├─ pre-response validation -> skip (не error)
        │  └─ ok -> status=applied (или letter_attach_failed)
-       ├─ во время cooldown (120 сек) — dequeue_read (до 3):
+       ├─ между apply (read в фоне, APPLY_COOLDOWN_SEC = 300):
        │  ├─ update_description -> status=discovered, description!=''
-       │  ├─ CAPTCHA_DETECTED -> defer_read_queue(60) + пауза 5 мин
-       │  └─ 2 капчи подряд -> STOP (VNC)
+       │  └─ CAPTCHA_DETECTED -> logger.error + notify + STOP (VNC, скриншот)
        └─ idle -> sleep(30)
        ↓
     assess_worker.py (assess_pipeline, AI9):
@@ -161,8 +161,8 @@ DATA FLOW (воркеры, не pipeline), `main.py` (DEPRECATED), `stage0_rules
 **Защита от банов (`read_description`):**
 - `SLEEP_BETWEEN = (10, 30)` — пауза между вакансиями.
 - Батчи: после 150-190 вакансий отдых 10-20 минут.
-- 1-я капча: `defer_read_queue(vid, 60)` + пауза 300 сек.
-- 2-я подряд: `STOP` (break) — нужно вмешательство (VNC).
+- Капча в read → `logger.error` + `notify` + STOP (нужен VNC).
+- Капча в apply после submit → скриншот `/tmp/captcha_apply_<id>.png` + STOP.
 - `dequeue_read` берёт `queued_at IS NULL OR queued_at <= now` (отложенные по времени).
 
 ---
