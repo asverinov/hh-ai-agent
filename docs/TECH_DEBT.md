@@ -20,23 +20,25 @@
 
 ## 🔴 Высокий приоритет (следующий шаг)
 
-1. **`apply_worker.py`** — не сделан. Берет `pending_approval` с `queue_priority=1`, делает `submit_application` через CloakBrowser (flock + `.browser-apply-pending`). Сейчас apply — вручную через TG-карточку. **Единая очередь с `read_description`** (один браузер): приоритет apply выше read, rate limit 5 мин на уровне БД.
-2. **`tg_bot` кнопка `enqueue_apply`** — сейчас бот делает `approve_and_apply` (синхронно). Надо переделать на `enqueue_apply` (ставит `queue_priority=1`, `apply_worker` подхватывает).
-3. **Генерация писем для новых pending** — после миграции `migrate_assess.py` надо запустить `cover_letter_worker.py` для всех новых `pending_approval` (v4.7 промпт). 141 старых pending + новые.
-4. **246 discovered без description** — после миграции 533 (с description) останутся 246 без. Нужен `read_description` (браузер) + вторым проходом `migrate_assess`. Отдельный шаг.
-5. **`reconcile_vacancies.py` — расписание** — сейчас ручной запуск. Нужен cron/periodic (раз в N дней), чтобы БД не копила stale.
+1. **`browser_worker.py`** — СДЕЛАН (AI10). Apply + read в одном цикле. `APPLY_COOLDOWN_SEC=120`, reads во время cooldown. `reset_all_applying()` на старте. TG → `enqueue_apply`. **Осталось:** первый успешный прогон на боевых данных, `letter_attach_failed` (138914331 — отклик ушёл, письмо нет).
+2. **`letter_attach_failed`** (138914331) — пометили `applied` (отклик ушёл, письмо не прикрепилось). Разобрать `_attach_cover_letter_after_response` (Drop-base модалка перекрывает). Связано с Escape-фиксом в AI10.
+3. **`138847467`** — `pending_approval`, `queue_priority=0`, `error_text='timeout_success_check_manually'`. Timeout 5с на success-локатор (уже 15с). Проверить вручную в браузере: отклик ушёл?
+4. **`generate_letters_for_pending.py`** — СДЕЛАН (AI10). Но `cover_letter_worker.py` (`discovered` → `pending_approval`) остаётся legacy. Объединить: `pending_approval` без письма → генерация (не через `request_approval`, а через `update_cover_letter`).
+5. **discovered без description** — 05.11: ~150 (было 246). `browser_worker` читает в idle (между apply). После read → `migrate_assess discovered`. Отдельный шаг.
+6. **`reconcile` — расписание** — inline в `search_worker` (AI10). Но `search_worker` не запущен постоянно. Нужен cron/periodic (раз в день) для `search_worker --once`.
 
 ---
 
 ## 🟡 Средний приоритет (архитектурная чистка)
 
-6. **`main.py` — DEPRECATED, удалить после стабилизации.** С 27.10 не менялся, не запускается. Воркеры — единственный путь. Удаление: после 2-3 итераций без инцидентов. До этого — оставить как fallback, но **не запускать**.
-7. **`profile.yaml` — полное выпиливание.** Сейчас используется: `hh.*` (search_worker, read_description), `candidate.excluded_*` (search_worker), `cover_letter.closing/max_length/required_portfolio_url` (cover_letter.py), `resumes.*` (summary + full_text). В LLM **не идёт**. План: вынести в отдельные конфиги (например, `prefilter_rules.yaml` + `resumes.yaml` уже есть), удалить файл.
-8. **`excluded_keywords` не проверяется нигде.** Нужен `description`, а `search_worker` работает до чтения. Варианты: (а) в `read_description` — regex после чтения; (б) в `assess_worker` — перед Stage 1; (в) отдельный воркер. Техдолг.
-9. **`ASSESS_MODEL` из `.env` игнорируется** (AI9). После порта `assess_worker` на `assess_pipeline` модели берутся из дефолтов `assess_stage1` (`qwen3.7-flash`) / `assess_stage2` (`mimo-v2.6-flash`). Если `.env` переопределял — теперь не работает. Решение: либо явно прокидывать из `settings.llm.assess_model`, либо задокументировать как «фиксированные модели».
-10. **Retry в `generate_cover_letter` теряет дайджест.** На первом провале `_safe_letter` заменяет `system_instructions` на короткую инструкцию без дайджеста. Модель справляется, но теряет контекст DS. TODO: добавить дайджест и на retry.
-11. **`Unclosed client session`** — aiohttp-сессия не закрывается в `ManagedLLMProvider`/провайдере. Мусорит в логах.
-12. **Консистентность модели на пограничных кейсах** (AI9). Одна и та же вакансия (`138488642` QC контакт-центра) в двух прогонах дала `reject` → `accept+OQ`. `138978638/639` (Head of Customer Support) — в первом прогоне противоречие, во втором согласовано. Эксперт: «норма, вариативность v1.5». Отслеживать на 779: если >10% повторных прогонов дают разные решения — система, разбираем.
+7. **`main.py` — DEPRECATED, удалить после стабилизации.** С 27.10 не менялся, не запускается. Воркеры — единственный путь. Удаление: после 2-3 итераций без инцидентов. До этого — оставить как fallback, но **не запускать**.
+8. **`profile.yaml` — полное выпиливание.** Сейчас используется: `hh.*` (search_worker, read_description), `candidate.excluded_*` (search_worker), `cover_letter.closing/max_length/required_portfolio_url` (cover_letter.py), `resumes.*` (summary + full_text). В LLM **не идёт**. План: вынести в отдельные конфиги (например, `prefilter_rules.yaml` + `resumes.yaml` уже есть), удалить файл.
+9. **`excluded_keywords` не проверяется нигде.** Нужен `description`, а `search_worker` работает до чтения. Варианты: (а) в `read_description` — regex после чтения; (б) в `assess_worker` — перед Stage 1; (в) отдельный воркер. Техдолг.
+10. **`ASSESS_MODEL` из `.env` игнорируется** (AI9). После порта `assess_worker` на `assess_pipeline` модели берутся из дефолтов `assess_stage1` (`qwen3.7-flash`) / `assess_stage2` (`mimo-v2.6-flash`). Если `.env` переопределял — теперь не работает. Решение: либо явно прокидывать из `settings.llm.assess_model`, либо задокументировать как «фиксированные модели».
+11. **Retry в `generate_cover_letter` теряет дайджест.** На первом провале `_safe_letter` заменяет `system_instructions` на короткую инструкцию без дайджеста. Модель справляется, но теряет контекст DS. TODO: добавить дайджест и на retry.
+12. **VPN-совместимость (Amnezia)** — MTU 1228, большие HTTPS-запросы к AITUNNEL/HH таймаутят. Split tunneling по IP для Cloudflare не работает (IP меняются). Решение: режим «Только Telegram через VPN» (IP-whitelist: `91.108.4.0/22`, `149.154.160.0/20`). Или VPN на хосте, но с app-based split (только для Windows/macOS — Linux VM не поддерживает). **Техдолг:** документировать в `INTERACTION.md` (как запускать при VPN).
+13. **`Unclosed client session`** — aiohttp-сессия не закрывается в `ManagedLLMProvider`/провайдере. Мусорит в логах.
+14. **Консистентность модели на пограничных кейсах** (AI9). Одна и та же вакансия (`138488642` QC контакт-центра) в двух прогонах дала `reject` → `accept+OQ`. `138978638/639` (Head of Customer Support) — в первом прогоне противоречие, во втором согласовано. Эксперт: «норма, вариативность v1.5». Отслеживать на 779: если >10% повторных прогонов дают разные решения — система, разбираем.
 
 ---
 
@@ -52,14 +54,14 @@
 
 ## 🟢 Низкий приоритет (оптимизация)
 
-13. **`_migrate_status_check` был сломан** (AI9-fix). Хардкодил старую CREATE TABLE (без `queued_at`/`description`/`evaluation_json`), падал при добавлении нового статуса в CHECK. Фикс: берёт реальный `CREATE TABLE` из `sqlite_master`, заменяет только `CHECK (status IN (...))`. **Проверено:** при добавлении `IRRELEVANT` миграция прошла, 4372 записи сохранены.
-14. **`Unclosed client session` в `managed.py`** (AI9). `control_run.py` фиксит `provider.close()`, но `ManagedLLMProvider` и провайдеры (`openai_compatible`, `anthropic_compatible`) не имеют `close()`. `assess_worker`/`migrate_assess` могут оставлять aiohttp-сессии. Техдолг.
-15. **`stage1_select` без `vacancy_id`** — в `llm_requests` для Stage 1 не пишется `vacancy_id` (исправлено в `assess_pipeline.py`, но старые записи остались).
-16. **`migrate_assess` без CLI-флагов.** Нет `--limit`, `--batch`, `--dry-run`. Сейчас — полный проход. Добавить для гибкости (особенно для тестовых прогонов 10-20).
-17. **`watch_workers.sh`** — монитор воркеров. Запланирован в `PLAN_workers_v1.md`, не реализован.
-18. **`scripts/migrate_assess.py` — stop при пустом `resume_text`** (AI9). Сейчас: `resume_text=""`, если файла нет. `assess_worker` делает `mark_analysis_failed`. Расхождение. Выровнять.
-19. **`pyproject`/`requirements`** — не проверял. Может, есть неиспользуемые зависимости после выпиливания `main.py`.
-20. **`profile.yaml` — снижение доли.** После AI9: `prefilter` (`hh.*`, `candidate.excluded_*`) читается из `prefilter_rules.yaml`. В `profile.yaml` осталось: `candidate.*` (кроме excluded), `hh.resume_name/search_queries/areas/remote_only`, `cover_letter.*`, `resumes.*`. Следующий шаг — `resumes.yaml`, `cover_letter.yaml`, `discover.yaml`. Не сейчас.
+14. **`_migrate_status_check` был сломан** (AI9-fix). Хардкодил старую CREATE TABLE (без `queued_at`/`description`/`evaluation_json`), падал при добавлении нового статуса в CHECK. Фикс: берёт реальный `CREATE TABLE` из `sqlite_master`, заменяет только `CHECK (status IN (...))`. **Проверено:** при добавлении `IRRELEVANT` миграция прошла, 4372 записи сохранены.
+15. **`Unclosed client session` в `managed.py`** (AI9). `control_run.py` фиксит `provider.close()`, но `ManagedLLMProvider` и провайдеры (`openai_compatible`, `anthropic_compatible`) не имеют `close()`. `assess_worker`/`migrate_assess` могут оставлять aiohttp-сессии. Техдолг.
+16. **`stage1_select` без `vacancy_id`** — в `llm_requests` для Stage 1 не пишется `vacancy_id` (исправлено в `assess_pipeline.py`, но старые записи остались).
+17. **`migrate_assess` без CLI-флагов.** Нет `--limit`, `--batch`, `--dry-run`. Сейчас — полный проход. Добавить для гибкости (особенно для тестовых прогонов 10-20).
+18. **`watch_workers.sh`** — монитор воркеров. Запланирован в `PLAN_workers_v1.md`, не реализован.
+19. **`scripts/migrate_assess.py` — stop при пустом `resume_text`** (AI9). Сейчас: `resume_text=""`, если файла нет. `assess_worker` делает `mark_analysis_failed`. Расхождение. Выровнять.
+20. **`pyproject`/`requirements`** — не проверял. Может, есть неиспользуемые зависимости после выпиливания `main.py`.
+21. **`profile.yaml` — снижение доли.** После AI9: `prefilter` (`hh.*`, `candidate.excluded_*`) читается из `prefilter_rules.yaml`. В `profile.yaml` осталось: `candidate.*` (кроме excluded), `hh.resume_name/search_queries/areas/remote_only`, `cover_letter.*`, `resumes.*`. Следующий шаг — `resumes.yaml`, `cover_letter.yaml`, `discover.yaml`. Не сейчас.
 
 ---
 

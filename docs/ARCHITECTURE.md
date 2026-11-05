@@ -38,10 +38,19 @@ DATA FLOW (воркеры, не pipeline), `main.py` (DEPRECATED), `stage0_rules
        ↓
     database.discover -> vacancies (status=discovered, salary_*)
        ↓
-    read_description.py (CloakBrowser, flock + батчи)
-       ├─ update_description -> status=discovered, description!=''
-       ├─ CAPTCHA_DETECTED -> defer_read_queue + пауза 300 сек
-       └─ 2 капчи подряд -> STOP (VNC)
+    browser_worker.py (AI10: единый браузерный, apply+read):
+       ├─ dequeue_apply (приоритет) -> hh_client.submit_application
+       │  ├─ модалка hh.ru + _get_resume_id(best_resume) + textarea + submit
+       │  ├─ CAPTCHA_DETECTED -> STOP (VNC)
+       │  ├─ VACANCY_REMOVED/HIDDEN -> mark_expired
+       │  ├─ questionnaire_required -> mark_skipped_by_id
+       │  ├─ pre_response_recheck -> skip (не error)
+       │  └─ ok -> status=applied (или letter_attach_failed)
+       ├─ во время cooldown (120 сек) — dequeue_read (до 3):
+       │  ├─ update_description -> status=discovered, description!=''
+       │  ├─ CAPTCHA_DETECTED -> defer_read_queue(60) + пауза 5 мин
+       │  └─ 2 капчи подряд -> STOP (VNC)
+       └─ idle -> sleep(30)
        ↓
     assess_worker.py (assess_pipeline, AI9):
        ├─ Stage 1: Qwen (assess1.md v1.1) -> ScreenResult
@@ -50,30 +59,29 @@ DATA FLOW (воркеры, не pipeline), `main.py` (DEPRECATED), `stage0_rules
           ├─ suitable=false -> rejected_by_llm (evaluation_json полный)
           └─ suitable=true  -> store_analysis (llm_decision=1)
        ↓
-    cover_letter_worker.py (Qwen, ds_cover_letter_digest.md v4.7)
-       └─ discovered с llm_decision=1 -> письмо -> pending_approval
+    generate_letters_for_pending.py (AI10, Qwen, ds_cover_letter_digest.md v4.7):
+       └─ pending_approval без письма -> generate_cover_letter -> UPDATE cover_letter (статус не меняется)
        ↓
     tg_bot.send_preview -> TG-карточка (кнопки apply/skip/edit)
        ↓
-    (manual) approval.approve_and_apply -> hh_client.submit_application
-       ├─ открывает модалку hh.ru
-       ├─ _get_resume_id(best_resume) -> dropdown (label[data-magritte-select-option])
-       ├─ textarea для сопровода
-       └─ submit -> status=applied
+    (TG) apply: -> database.enqueue_apply (queue_priority=1) -> browser_worker подхватит
 
 **Очереди в БД (`vacancies.queued_at`):**
 - `queued_at` — «в работе» (ставит `dequeue_*`), снимает `update_*`/`request_approval`/`mark_analysis_failed`.
-- `dequeue_read` -> `update_description` / `reset_read_queue` / `defer_read_queue(vid, minutes)`.
+- `dequeue_read` -> `update_description` / `reset_read_queue` / `defer_read_queue(vid, minutes)` / `mark_expired`.
+- `dequeue_apply` (AI10, lease 10 мин) -> `complete_application` (ok) / `mark_expired` / `mark_skipped_by_id` / `defer_apply_queue(vid, minutes)`.
 - `dequeue_assess` -> `store_analysis` (ok) / `reject_by_assess` (reject) / `mark_analysis_failed`.
-- `dequeue_cover_letter` -> `request_approval`.
+- `dequeue_cover_letter` -> `request_approval` (legacy; AI10 — `generate_letters_for_pending.py` использует `UPDATE cover_letter`, без смены статуса).
 - **Правило:** любой метод, завершающий работу, обязан ставить `queued_at=NULL`.
 
 **Параллельные процессы (независимы):**
-- `search_worker` — API, наполняет `discovered`.
-- `read_description` — CloakBrowser, добавляет `description`.
+- `search_worker` — API + inline reconcile (AI10).
+- **`browser_worker`** (AI10) — CloakBrowser, **apply (приоритет) + read description** в одном цикле. Заменяет `read_description` + `apply_worker`.
 - `assess_worker` — LLM, Stage 1 + Stage 2.
-- `cover_letter_worker` — LLM, письма.
+- `cover_letter_worker` — LLM, письма (legacy, для `discovered`).
+- **`generate_letters_for_pending`** (AI10) — LLM, письма для `pending_approval` без письма.
 - `migrate_assess` — одноразовый, переоценка накопленного.
+- **`run_tg_bot`** (AI10) — TelegramService, entrypoint без `main.py`.
 - `retry_due_analyses` — retry для `analysis_failed` (только в `main.py`, legacy).
 
 **Back-pressure:** не реализован в воркерах. В `main.py` — если `pending >= MAX_PENDING_RECOMMENDATIONS`, fetch пропускается.
@@ -137,17 +145,18 @@ DATA FLOW (воркеры, не pipeline), `main.py` (DEPRECATED), `stage0_rules
 
 ---
 
-## ВОРКЕРЫ (актуально на AI9)
+## ВОРКЕРЫ (актуально на AI10)
 
 Фоновые процессы, каждый — отдельный `scripts/*.py` (`nohup env PYTHONPATH=. python3 ... > /tmp/*.log 2>&1 &`):
 
 | Воркер | Что | LLM? | Браузер? | Промпт/модель |
 |---|---|---|---|---|
-| `search_worker.py` | API `similar_vacancies` для 4 резюме -> `discovered` | нет | нет | — |
-| `read_description.py` | `discovered` без description -> CloakBrowser -> description | нет | **да** (flock + батчи) | — |
+| `search_worker.py` | API `similar_vacancies` для 4 резюме -> `discovered` + **inline reconcile** (AI10) | нет | нет | — |
+| **`browser_worker.py`** | **AI10: apply (приоритет) + read description** в одном цикле. TG → `enqueue_apply` → воркер. `APPLY_COOLDOWN_SEC=120`, reads во время cooldown. | нет | **да** | — |
 | `assess_worker.py` | `discovered` с description -> Stage 1 + Stage 2 -> `evaluation_json` | **да** | нет | assess1 v1.1 + assess2 v1.4 (AI9) |
-| `cover_letter_worker.py` | `discovered` с `llm_decision=1` -> письмо v4.7 -> `pending_approval` | **да** | нет | ds_cover_letter_digest v4.7 |
-| `apply_worker.py` | **НЕ СДЕЛАН** (apply вручную через TG) | — | — | — |
+| `cover_letter_worker.py` | `discovered` с `llm_decision=1` -> письмо v4.7 -> `pending_approval` (legacy) | **да** | нет | ds_cover_letter_digest v4.7 |
+| **`generate_letters_for_pending.py`** | **AI10: `pending_approval` без письма → `generate_cover_letter` → `UPDATE cover_letter`** (не меняет статус) | **да** | нет | ds_cover_letter_digest v4.7 |
+| `run_tg_bot.py` | **AI10: entrypoint `TelegramService`** (без `main.py`). `_NoopSender` — apply делает `browser_worker`. | нет | нет | — |
 
 **Защита от банов (`read_description`):**
 - `SLEEP_BETWEEN = (10, 30)` — пауза между вакансиями.
@@ -400,6 +409,7 @@ DATA FLOW (воркеры, не pipeline), `main.py` (DEPRECATED), `stage0_rules
 
 ## CHANGELOG (по коммитам)
 
+- **AI10 (05.11)**: **reconcile inline в `search_worker`** (`reconcile.py`, все статусы кроме applied/skipped/etc); **`browser_worker.py`** (apply+read, cooldown 120, reads во время cooldown, `reset_all_applying`, капча в apply → STOP); **salary thresholds RUR 200k / USD 3000** (`prefilter_rules.yaml`, `search_worker`, `prefilter_audit_pending`, `enqueue_apply` — логика `to<=/from<`); **`generate_letters_for_pending.py`**; **`run_tg_bot.py`** (entrypoint без main.py); **`mark_expired` + discovered** (был бесконечный цикл read); **`prefilter_audit_pending.py`**; **VPN-диагноз** (MTU 1228, Cloudflare, «только Telegram через VPN»); **контент из git** (.gitignore).
 - **AI9 (03.11)**: **reconcile_vacancies.py** (сверка с `similar_vacancies`, 779 backfill + 323 irrelevant); **`irrelevant` статус**; **удалён `backfill_experience.py`** (API `/vacancies/{id}` закрыт); фикс `verdict-contains` в `validate_stage2_result` (startswith, не in); фикс `check_prefilter` — короткие аббревиатуры (РКО, PKI) через word boundary; фикс `_migrate_status_check` (реальный CREATE TABLE из sqlite_master, не хардкод); `migrate_assess` без pending + сохраняет `experience_id`; `docs/INTERACTION.md`.
 - **AI9 (02.11)**: `assess_worker` → `assess_pipeline`; `stage0_rules.yaml` → `stage1_hints.yaml` (удалён `reject:`); `_is_junior_title` + `trainee`/`intern`; локальная проверка `item_exp` в `search_worker`; код-страховка `level<=2 && match<0.5`; авто-стоп в `migrate_assess`; ARCHITECTURE исправлен (Stage 0, pipeline, main.py legacy).
 - **AI8 (02.11)**: Новая архитектура оценки (Stage 1 + Stage 2), выпиливание `profile.yaml` из LLM, код-страховка `is_required`, миграция. Батчи в `read_description`.
