@@ -1239,6 +1239,27 @@ class HHClient:
                 ):
                     raise RuntimeError("required_cover_letter_not_preserved")
             await submit_button.click()
+            await page.wait_for_timeout(1500)
+            captcha_after_submit = (
+                page.locator('img[src*="captcha"], [data-qa*="captcha"]')
+                .or_(page.get_by_text("не робот", exact=False))
+                .or_(page.get_by_text("символы с картинки", exact=False))
+                .first
+            )
+            if await captcha_after_submit.is_visible():
+                logger.error(
+                    "captcha_after_submit job_id=%s url=%s",
+                    permission.job_id, vacancy.url,
+                )
+                try:
+                    shot = f"/tmp/captcha_apply_{permission.job_id}.png"
+                    await page.screenshot(path=shot, full_page=True)
+                    logger.error("captcha_screenshot saved=%s", shot)
+                except Exception as _e:
+                    logger.error("captcha_screenshot_failed err=%s", _e)
+                raise CaptchaDetectedError(
+                    f"captcha_after_submit job_id={permission.job_id}"
+                )
             success_marker = (
                 page.locator(
                     '[data-qa="vacancy-response-success"], '

@@ -81,7 +81,7 @@ async def _apply_one(hh: HHClient, db: Database, settings, row: dict, notify) ->
         if _v is not None and _v.status.value == "skipped":
             await notify(f"⏭ Пропущено (анкета): {title}")
             return "skip"
-        if _v is not None and "pre_response_recheck" in (_v.error_text or ""):
+        if _v is not None and "pre-response validation" in (_v.error_text or ""):
             logger.warning("pre_response_recheck job_id=%s — defer, не считаем за error", job_id)
             db.defer_apply_queue(job_id, 60)
             return "skip"
@@ -120,7 +120,6 @@ async def main() -> None:
 
     apply_streak_errors = 0
     apply_not_before: float = 0.0  # monotonic; apply blocked until then
-    read_streak_captcha = 0
     next_read_at: float | None = None  # monotonic; None → read сразу
 
     _reset = db.reset_all_applying()
@@ -174,7 +173,6 @@ async def main() -> None:
                         url=rrow.get("url") or f"https://hh.ru/vacancy/{rrow['id']}",
                         search_query="",
                     )
-                    captcha_triggered = False
                     try:
                         details = await hh.read_vacancy(summary, None)
                         from hh_client import PageState
@@ -184,29 +182,24 @@ async def main() -> None:
                                 details.company or "", details.company_url or "",
                             )
                             logger.info("read_ok id=%s len=%d", rrow["id"], len(details.description or ""))
-                            read_streak_captcha = 0
                         elif details.state in (PageState.VACANCY_REMOVED, PageState.VACANCY_HIDDEN):
                             db.mark_expired(str(rrow["id"]))
                             logger.info("read_expired id=%s state=%s", rrow["id"], details.state.value)
                         elif details.state == PageState.CAPTCHA_DETECTED:
-                            read_streak_captcha += 1
-                            db.defer_read_queue(str(rrow["id"]), 60)
-                            logger.warning("read_captcha id=%s streak=%d", rrow["id"], read_streak_captcha)
-                            if read_streak_captcha >= 2:
-                                logger.error("STOP: 2 капчи подряд в read")
-                                await notify("⚠️ 2 капчи подряд в read. Останавливаюсь, нужен VNC.")
-                                break
-                            captcha_triggered = True
+                            logger.error(
+                                "STOP: капча при read id=%s url=%s",
+                                rrow["id"], summary.url,
+                            )
+                            await notify(
+                                f"⚠️ Капча при read (id={rrow['id']}). Останавливаюсь, нужен VNC."
+                            )
+                            break
                         else:
                             db.reset_read_queue(str(rrow["id"]))
                             logger.warning("read_unknown id=%s state=%s", rrow["id"], details.state.value)
                     except Exception as exc:
                         logger.warning("read_error id=%s err=%s", rrow["id"], exc)
                         db.defer_read_queue(str(rrow["id"]), 30)
-                    if captcha_triggered:
-                        # Глобальная пауза: apply тоже ждёт (риск повторной капчи).
-                        logger.warning("read_captcha_pause 300s (global)")
-                        await asyncio.sleep(300)
                     next_read_at = time.monotonic() + random.uniform(*READ_SLEEP)
                     continue
 
