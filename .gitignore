@@ -83,3 +83,4 @@ docs/datasets/calibration_set.json
 docs/datasets/cover_letter_models_test_*.md
 stage1_hints.yaml
 !docs/datasets/*.example.md
+scripts/open_vacancy_vnc.py

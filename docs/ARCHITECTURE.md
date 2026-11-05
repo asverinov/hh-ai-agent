@@ -31,7 +31,7 @@ DATA FLOW (воркеры, не pipeline), `main.py` (DEPRECATED), `stage0_rules
     search_worker.py — pre-filter (до БД):
        ├─ experience: локальная проверка item_exp (defense-in-depth, AI9)
        ├─ junior: _is_junior_title (маркеры из config.py HHProfile.junior_title_markers)
-       ├─ salary: _parse_salary (hard_min из profile.yaml)
+       ├─ salary: _parse_salary (hard_min из prefilter_rules.yaml)
        ├─ excluded_positions: title_rejection_reason
        ├─ excluded_companies: inline
        └─ seen_vacancies: пропуск уже виденных

@@ -1247,7 +1247,7 @@ class HHClient:
                 .or_(page.get_by_text("Отклик отправлен", exact=False))
                 .first
             )
-            await success_marker.wait_for(state="visible", timeout=15000_000)
+            await success_marker.wait_for(state="visible", timeout=15_000)
             if not await self._response_confirmed(page, vacancy.url):
                 raise RuntimeError("HH.ru did not confirm the application")
             if required_portfolio:

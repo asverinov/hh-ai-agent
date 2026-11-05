@@ -1,12 +1,22 @@
 #!/usr/bin/env python3
 """browser_worker.py — единый браузерный процесс: apply (приоритет) + read_description.
 
-Один CloakBrowser. Apply первым (queue_priority>=1), иначе read.
-Капча в apply → STOP (VNC). В read → defer 60 мин + пауза 5 мин.
+Диспетчер: один CloakBrowser, один event loop.
+- Если прошло >= APPLY_COOLDOWN_SEC с последнего apply и очередь apply не пуста — apply.
+- Иначе, если прошла пауза с последнего read — read.
+- Иначе — короткий сон до ближайшего события.
+
+Паузы apply и read — это свойства задач, а не блокировки браузера:
+во время 5-минутной паузы apply браузер крутит read (по одному чтению
+каждые 10–40 секунд), а не спит.
+
+Капча в apply → STOP (VNC). Капча в read → defer 60 мин + глобальная
+пауза 5 мин; 2 подряд → STOP.
 """
 import asyncio
 import random
 import sys
+import time
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -45,8 +55,15 @@ def _now() -> datetime:
     return datetime.now(tz=timezone.utc)
 
 
+def _parse_dt(iso: str) -> datetime:
+    dt = datetime.fromisoformat(iso)
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt
+
+
 async def _apply_one(hh: HHClient, db: Database, settings, row: dict, notify) -> str:
-    """Вернуть: 'ok' | 'expired' | 'error' | 'captcha'."""
+    """Вернуть: 'ok' | 'expired' | 'error' | 'captcha' | 'skip'."""
     job_id = str(row["id"])
     title = row.get("title") or job_id
     permit = db.approve(job_id, settings.tg_user_id, settings.tg_user_id, _now(), 30)
@@ -60,17 +77,14 @@ async def _apply_one(hh: HHClient, db: Database, settings, row: dict, notify) ->
         if ok:
             await notify(f"✓ Отклик отправлен: {title}")
             return "ok"
-        # hh_client мог сам пометить skipped (questionnaire_required)
         _v = db.get(job_id)
         if _v is not None and _v.status.value == "skipped":
             await notify(f"⏭ Пропущено (анкета): {title}")
             return "skip"
-        # AI11: pre_response_recheck — permit уже использован, отклик мог уйти.
-        # Это не ошибка для streak, но требует проверки. Defer, не считаем за error.
         if _v is not None and "pre_response_recheck" in (_v.error_text or ""):
             logger.warning("pre_response_recheck job_id=%s — defer, не считаем за error", job_id)
             db.defer_apply_queue(job_id, 60)
-            return "skip"  # не увеличивает apply_streak_errors
+            return "skip"
         await notify(f"✗ Не удалось: {title}")
         db.defer_apply_queue(job_id, 5)
         return "error"
@@ -105,89 +119,109 @@ async def main() -> None:
     async def notify(text): await tg_notify(token, chat_id, text)
 
     apply_streak_errors = 0
+    apply_not_before: float = 0.0  # monotonic; apply blocked until then
     read_streak_captcha = 0
+    next_read_at: float | None = None  # monotonic; None → read сразу
 
     _reset = db.reset_all_applying()
     if _reset:
         logger.warning("reset_stale_applying: %d вакансий вернулись в pending", _reset)
 
-    logger.info("browser_worker started")
+    logger.info(
+        "browser_worker started (dispatcher: apply priority, cooldown=%ds, read_pause=%ds-%ds)",
+        APPLY_COOLDOWN_SEC, READ_SLEEP[0], READ_SLEEP[1],
+    )
     try:
         while True:
-            # 1. Apply (приоритет)
-            last = db.get_last_apply_at()
-            if last:
+            # ---------- Apply (приоритет) ----------
+            apply_ready = time.monotonic() >= apply_not_before
+            last_iso = db.get_last_apply_at()
+            if last_iso:
                 try:
-                    last_dt = datetime.fromisoformat(last)
-                    elapsed = (_now() - last_dt).total_seconds()
+                    elapsed = (_now() - _parse_dt(last_iso)).total_seconds()
                     if elapsed < APPLY_COOLDOWN_SEC:
-                        wait = int(APPLY_COOLDOWN_SEC - elapsed) + 1
-                        logger.info("apply_cooldown wait=%ds", wait)
-                        await asyncio.sleep(wait)
-                        continue
+                        apply_ready = False
                 except Exception:
                     pass
 
-            row = db.dequeue_apply()
-            if row:
-                result = await _apply_one(hh, db, settings, row, notify)
-                if result == "captcha":
-                    logger.error("STOP: captcha при apply")
-                    break
-                if result == "ok":
-                    apply_streak_errors = 0
-                    await asyncio.sleep(APPLY_COOLDOWN_SEC)
-                else:
-                    apply_streak_errors += 1
-                    if apply_streak_errors >= 3:
-                        logger.error("STOP: 3 подряд ошибки apply")
-                        await notify("⚠️ 3 ошибки apply подряд. Останавливаюсь.")
+            if apply_ready:
+                row = db.dequeue_apply()
+                if row:
+                    job_id = str(row["id"])
+                    logger.info("apply_start id=%s", job_id)
+                    result = await _apply_one(hh, db, settings, row, notify)
+                    if result == "captcha":
+                        logger.error("STOP: captcha при apply")
                         break
-                    await asyncio.sleep(30)
-                continue
-
-            # 2. Read description
-            rrow = db.dequeue_read()
-            if rrow:
-                summary = VacancySummary(
-                    id=str(rrow["id"]),
-                    title=rrow.get("title") or "",
-                    url=rrow.get("url") or f"https://hh.ru/vacancy/{rrow['id']}",
-                    search_query="",
-                )
-                try:
-                    details = await hh.read_vacancy(summary, None)
-                    from hh_client import PageState
-                    if details.state == PageState.VACANCY_LOADED:
-                        db.update_description(
-                            str(rrow["id"]), details.description or "",
-                            details.company or "", details.company_url or "",
-                        )
-                        logger.info("read_ok id=%s len=%d", rrow["id"], len(details.description or ""))
-                        read_streak_captcha = 0
-                    elif details.state in (PageState.VACANCY_REMOVED, PageState.VACANCY_HIDDEN):
-                        db.mark_expired(str(rrow["id"]))
-                        logger.info("read_expired id=%s state=%s", rrow["id"], details.state.value)
-                    elif details.state == PageState.CAPTCHA_DETECTED:
-                        read_streak_captcha += 1
-                        db.defer_read_queue(str(rrow["id"]), 60)
-                        logger.warning("read_captcha id=%s streak=%d", rrow["id"], read_streak_captcha)
-                        if read_streak_captcha >= 2:
-                            logger.error("STOP: 2 капчи подряд в read")
-                            await notify("⚠️ 2 капчи подряд в read. Останавливаюсь, нужен VNC.")
-                            break
-                        await asyncio.sleep(300)
+                    if result == "ok":
+                        apply_streak_errors = 0
                     else:
-                        db.reset_read_queue(str(rrow["id"]))
-                        logger.warning("read_unknown id=%s state=%s", rrow["id"], details.state.value)
-                except Exception as exc:
-                    logger.warning("read_error id=%s err=%s", rrow["id"], exc)
-                    db.defer_read_queue(str(rrow["id"]), 30)
-                await asyncio.sleep(random.uniform(*READ_SLEEP))
-                continue
+                        apply_streak_errors += 1
+                        apply_not_before = time.monotonic() + APPLY_COOLDOWN_SEC
+                        if apply_streak_errors >= 3:
+                            logger.error("STOP: 3 подряд ошибки apply")
+                            await notify("⚠️ 3 ошибки apply подряд. Останавливаюсь.")
+                            break
+                    continue
 
-            # 3. Пусто
-            await asyncio.sleep(IDLE_SLEEP)
+            # ---------- Read ----------
+            if next_read_at is None or time.monotonic() >= next_read_at:
+                rrow = db.dequeue_read()
+                if rrow:
+                    summary = VacancySummary(
+                        id=str(rrow["id"]),
+                        title=rrow.get("title") or "",
+                        url=rrow.get("url") or f"https://hh.ru/vacancy/{rrow['id']}",
+                        search_query="",
+                    )
+                    captcha_triggered = False
+                    try:
+                        details = await hh.read_vacancy(summary, None)
+                        from hh_client import PageState
+                        if details.state == PageState.VACANCY_LOADED:
+                            db.update_description(
+                                str(rrow["id"]), details.description or "",
+                                details.company or "", details.company_url or "",
+                            )
+                            logger.info("read_ok id=%s len=%d", rrow["id"], len(details.description or ""))
+                            read_streak_captcha = 0
+                        elif details.state in (PageState.VACANCY_REMOVED, PageState.VACANCY_HIDDEN):
+                            db.mark_expired(str(rrow["id"]))
+                            logger.info("read_expired id=%s state=%s", rrow["id"], details.state.value)
+                        elif details.state == PageState.CAPTCHA_DETECTED:
+                            read_streak_captcha += 1
+                            db.defer_read_queue(str(rrow["id"]), 60)
+                            logger.warning("read_captcha id=%s streak=%d", rrow["id"], read_streak_captcha)
+                            if read_streak_captcha >= 2:
+                                logger.error("STOP: 2 капчи подряд в read")
+                                await notify("⚠️ 2 капчи подряд в read. Останавливаюсь, нужен VNC.")
+                                break
+                            captcha_triggered = True
+                        else:
+                            db.reset_read_queue(str(rrow["id"]))
+                            logger.warning("read_unknown id=%s state=%s", rrow["id"], details.state.value)
+                    except Exception as exc:
+                        logger.warning("read_error id=%s err=%s", rrow["id"], exc)
+                        db.defer_read_queue(str(rrow["id"]), 30)
+                    if captcha_triggered:
+                        # Глобальная пауза: apply тоже ждёт (риск повторной капчи).
+                        logger.warning("read_captcha_pause 300s (global)")
+                        await asyncio.sleep(300)
+                    next_read_at = time.monotonic() + random.uniform(*READ_SLEEP)
+                    continue
+
+            # ---------- Idle: короткий сон до ближайшего события ----------
+            sleep_for = float(IDLE_SLEEP)
+            if next_read_at is not None:
+                sleep_for = min(sleep_for, max(1.0, next_read_at - time.monotonic()))
+            if last_iso:
+                try:
+                    apply_wait = APPLY_COOLDOWN_SEC - (_now() - _parse_dt(last_iso)).total_seconds()
+                    if apply_wait > 0:
+                        sleep_for = min(sleep_for, max(1.0, apply_wait))
+                except Exception:
+                    pass
+            await asyncio.sleep(max(1.0, sleep_for))
     finally:
         try:
             await backend.close()

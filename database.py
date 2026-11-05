@@ -780,8 +780,9 @@ class Database:
         """Пометить вакансию как expired (закрыта на hh.ru)."""
         with self._connect() as connection:
             cur = connection.execute(
-                "UPDATE vacancies SET status = ?, queued_at = NULL WHERE id = ? AND status IN (?, ?)",
+                "UPDATE vacancies SET status = ?, queued_at = NULL WHERE id = ? AND status IN (?, ?, ?)",
                 (VacancyStatus.EXPIRED.value, vacancy_id,
+                 VacancyStatus.DISCOVERED.value,
                  VacancyStatus.PENDING_APPROVAL.value, VacancyStatus.APPLYING.value),
             )
             return cur.rowcount > 0
@@ -1419,7 +1420,7 @@ class Database:
             supplied_hash = hashlib.sha256(permit.encode()).hexdigest()
             cursor = connection.execute(
                 """
-                UPDATE vacancies SET status = ?, applied_at = ?, error_text = ?, permit_hash = NULL
+                UPDATE vacancies SET status = ?, applied_at = ?, error_text = ?, permit_hash = NULL, queued_at = NULL, queue_priority = 0
                 WHERE id = ? AND status = ? AND permit_hash = ?
                 """,
                 (
