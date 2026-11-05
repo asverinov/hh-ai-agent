@@ -196,4 +196,83 @@
 
 ---
 
+## 9. AI11: Web UI вместо TG (план)
+
+**Проблема:** Telegram требует VPN, но VPN (Amnezia, MTU 1228) ломает большие HTTPS-запросы к AITUNNEL/hh.ru. **Взаимоисключающе:** либо TG (через VPN), либо LLM/hh.ru (без VPN). Workaround — 2 режима, но это неудобно.
+
+**Решение:** Web UI на виртуалке. TG — fallback (запускается только в VPN-режиме, когда нужен).
+
+### 9.1. Стек
+
+- **FastAPI** (async, лёгкий) + Jinja2 для шаблонов + htmx или ванильный JS.
+- **Auth:** один пароль в `.env`, cookie (SameSite=Lax, HttpOnly, 30 дней).
+- **Порт:** 8080 (или 80 с reverse-proxy). Доступ из локальной сети VM.
+- **Service manager:** subprocess + PID-файлы (start/stop воркеров). systemd — опционально позже.
+
+### 9.2. Страницы
+
+| URL | Что | Источник |
+|---|---|---|
+| `/` | Список вакансий. Табы: «Выбранные» / «Отвергнутые». Слева — список, справа — карточка выбранной. Сортировка `confidence` DESC, фильтр `is_required=true match<0.7`. | `pending_approval`, `rejected_by_llm` |
+| `/vacancy/{id}` | Карточка: заголовок + ссылка на hh.ru (новая вкладка) + оценка + письмо + кнопки. | `vacancies` |
+| `/monitoring` | Статусы воркеров (start/stop/restart) + последние строки логов + счётчики по статусам. | PID-файлы + `/tmp/*.log` |
+| `/login` | Пароль. | `.env` |
+
+**iframe с hh.ru — НЕВОЗМОЖЕН.** `X-Frame-Options: DENY` + `Content-Security-Policy: frame-ancestors` на уровне документа. Обход (вырезать заголовки, прокси, Chrome-extension) — не работает для SPA. **Только ссылка** «открыть в новой вкладке».
+
+### 9.3. Endpoints (все — те же вызовы, что в `tg_bot`)
+
+- `POST /api/apply/{id}` → `db.enqueue_apply(vid)` (уже есть). `browser_worker` подхватит.
+- `POST /api/skip/{id}` → `db.skip(vid, ...)` (уже есть).
+- `POST /api/edit/{id}` (body: текст) → `db.update_cover_letter(vid, text)` (уже есть).
+- `POST /api/unreject/{id}` → **НОВЫЙ** `unreject_and_request_letter(vid)`: `UPDATE status='pending_approval', llm_decision=1` + `generate_cover_letter` + `UPDATE cover_letter`. ~15 строк.
+- `GET /api/status` → `db.stats()` + `db.count_pending()` + PID-статусы воркеров.
+- `POST /api/worker/{name}/{action}` → start/stop/restart.
+
+### 9.4. Расширить `discover()` — 10 полей из API (2–3 часа)
+
+API `similar_vacancies` уже отдаёт, но `search_worker` их **теряет**. Добавить в `database.discover()` и миграцию БД (`ALTER TABLE`):
+
+| Поле API | Колонка | Зачем |
+|---|---|---|
+| `published_at` | `published_at` | **Сортировка «кто раньше»** — важно для apply (быстрее отклик = выше шанс). |
+| `created_at` | `created_at` | — |
+| `initial_created_at` | `initial_created_at` | — |
+| `employment.id` | `employment` | фильтр (full/part/project) |
+| `schedule.id` | `schedule` | фильтр (remote/fullDay/flexible) |
+| `work_format` | `work_format` | фильтр (ON_SITE/REMOTE/HYBRID) |
+| `area.name` | `area` | город |
+| `address.metro` | `address_metro` | метро |
+| `employer.id` | `employer_id` | дедуп по компании |
+| `key_skills` | `key_skills_json` | фильтр по критичным навыкам |
+
+`read_vacancy` (браузер) — **только для `description`**, как сейчас. 10 полей из шапки hh.ru — опционально (rating, responses_count), не в MVP.
+
+### 9.5. Оценка AI11
+
+| Этап | Время |
+|---|---|
+| FastAPI скелет + `/` + `/login` + `apply/skip/edit` | 1–2 дня |
+| `/vacancy/{id}` + `unreject_and_request_letter` | 1 день |
+| Расширить `discover()` (10 полей) + сортировка | 0.5 дня |
+| `/monitoring` (start/stop воркеров) | 0.5 дня |
+| Полировка, тесты на 182 pending | 0.5 дня |
+| **MVP** | **3–4 дня** |
+
+### 9.6. Что остаётся
+
+- TG (`tg_bot.py`, `run_tg_bot.py`) — не удалять, fallback. Запускать только когда нужен TG (VPN-режим, push в телефон).
+- `browser_worker`, `assess_worker`, `migrate_assess`, `search_worker` — **без изменений**. Веб — только UI + `enqueue_apply` + start/stop.
+- VPN-проблема **исчезает** для основного сценария (LLM/hh.ru без VPN, веб в локальной сети).
+
+### 9.7. Открытые вопросы (на AI11)
+
+1. **Auth:** один пароль — достаточно? Или нужен 2FA / несколько пользователей?
+2. **Доступ:** только локальная сеть VM или reverse-proxy с ноута (HTTPS)?
+3. **Service manager:** subprocess/PID или systemd?
+4. **Push-уведомления** (было в TG): web-push / email / ничего?
+5. **«Сопровод без оценки»** для `rejected_by_llm` — подтверждено, нужно. Точный UX (кнопка на карточке отвергнутой).
+
+---
+
 *Создан 05.11.2026. При обновлении — старую версию в `docs/bak/AI10-digest.md.bak-<timestamp>`.*
