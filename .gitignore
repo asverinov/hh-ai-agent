@@ -85,3 +85,4 @@ stage1_hints.yaml
 !docs/datasets/*.example.md
 scripts/open_vacancy_vnc.py
 docs/AI*-digest.md
+*.backup
