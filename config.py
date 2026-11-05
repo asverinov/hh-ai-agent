@@ -99,6 +99,7 @@ class PrefilterRules:
     excluded_keywords: tuple[str, ...]
     excluded_keywords_contextual: tuple[ContextualKeyword, ...] = ()
     employment_type_filter: EmploymentTypeFilter | None = None
+    salary_hard_min_usd: int = 3000
 
 
 @dataclass(frozen=True)
@@ -253,6 +254,7 @@ def _fallback_prefilter(candidate: CandidateProfile, hh: HHProfile) -> Prefilter
         excluded_keywords=candidate.excluded_keywords,
         excluded_keywords_contextual=(),
         employment_type_filter=None,
+        salary_hard_min_usd=3000,
     )
 
 
@@ -289,6 +291,7 @@ def _load_prefilter_rules(
         return v
 
     salary = _int_val("salary_hard_min", hh.salary_hard_min)
+    salary_usd = _int_val("salary_hard_min_usd", 3000)
 
     contextual: list[ContextualKeyword] = []
     raw_ctx = data.get("excluded_keywords_contextual", [])
@@ -332,6 +335,7 @@ def _load_prefilter_rules(
         excluded_keywords=_str_list("excluded_keywords"),
         excluded_keywords_contextual=tuple(contextual),
         employment_type_filter=et_filter,
+        salary_hard_min_usd=salary_usd,
     )
 
 

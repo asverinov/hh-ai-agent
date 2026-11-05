@@ -23,7 +23,7 @@ from vacancy_filter import title_rejection_reason
 LOG = Path(f"search_worker_{datetime.now().strftime('%Y%m%d_%H%M')}.log")
 RESUME_CODES = ["RP", "RSP", "RPO", "ROP"]
 PER_PAGE = 100
-SLEEP_BETWEEN_PAGES = (20, 30)   # сек между API-запросами
+SLEEP_BETWEEN_PAGES = (5, 10)   # сек между API-запросами
 SLEEP_AFTER_CYCLE = 600           # 10 мин после полного обхода
 
 
@@ -34,7 +34,33 @@ def log(msg):
         f.write(line + "\n")
 
 
-async def search_one_resume(hh, db, code: str, max_pages: int) -> tuple[int, int]:
+def _salary_below_threshold(
+    s_from: int | None, s_to: int | None, currency: str,
+    hard_min_rur: int, hard_min_usd: int,
+) -> bool:
+    """True = зарплата ниже порога (отбросить).
+
+    Логика (максимум важнее минимума):
+      - есть "to" (вилка "от X до Y" / "до Y"): режем если Y <= threshold
+      - только "from" ("от X"): режем если X < threshold
+    RUR/пусто → RUR-порог, USD/EUR → USD-порог, прочие валюты — не режем.
+    """
+    cur = (currency or "").upper()
+    if cur in ("", "RUR", "RUB"):
+        threshold = hard_min_rur
+    elif cur in ("USD", "EUR"):
+        threshold = hard_min_usd
+    else:
+        return False  # KZT, BYR, etc. — не режем
+
+    if s_to is not None and s_to > 0:      # верхний предел задан
+        return s_to <= threshold
+    if s_from is not None and s_from > 0:  # только "от X"
+        return s_from < threshold
+    return False
+
+
+async def search_one_resume(hh, db, code: str, max_pages: int, seen_acc: dict) -> tuple[int, int]:
     """Возвращает (new_count, pages_scanned)."""
     rid = hh._get_resume_id(code)
     if not rid:
@@ -59,6 +85,10 @@ async def search_one_resume(hh, db, code: str, max_pages: int) -> tuple[int, int
             vid = str(item.get("id", "")).strip()
             if not vid:
                 continue
+            seen_acc[vid] = {
+                "experience_id": (item.get("experience") or {}).get("id"),
+                "resume_code": code,
+            }
             if db.is_seen(vid):
                 continue
                 
@@ -78,9 +108,12 @@ async def search_one_resume(hh, db, code: str, max_pages: int) -> tuple[int, int
                 
             # 2. Зарплата (hard_min)
             s_from, s_to, s_cur = _parse_salary(item)
-            peek = s_to if s_to is not None else s_from
-            if peek is not None and peek < hh.settings.profile.prefilter.salary_hard_min:
-                log(f"SKIP_SALARY {vid} {s_from}..{s_to} {s_cur}")
+            _pf = hh.settings.profile.prefilter
+            if _salary_below_threshold(
+                s_from, s_to, s_cur,
+                _pf.salary_hard_min, _pf.salary_hard_min_usd,
+            ):
+                log(f"SKIP_SALARY {vid} {s_from}..{s_to} {s_cur} (RUR<{_pf.salary_hard_min} / USD<{_pf.salary_hard_min_usd})")
                 continue
                 
             # 3. Исключенные позиции
@@ -123,6 +156,10 @@ async def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--limit", type=int, default=0, help="0=все страницы, N=макс N страниц на резюме")
     ap.add_argument("--once", action="store_true", help="один цикл и выход (без sleep 600)")
+    ap.add_argument("--reconcile-dry-run", action="store_true",
+                    help="Reconcile: только отчёт, БД не трогает")
+    ap.add_argument("--dry-run", action="store_true",
+                    help="Ничего не пишет в БД (discover + reconcile dry)")
     args = ap.parse_args()
 
     s = load_settings()
@@ -135,12 +172,30 @@ async def main():
         while True:
             cycle_start = datetime.now()
             total_new = 0
+            seen_acc: dict = {}
             for code in RESUME_CODES:
-                new, pages = await search_one_resume(hh, db, code, args.limit)
+                new, pages = await search_one_resume(hh, db, code, args.limit, seen_acc)
                 total_new += new
                 log(f"ИТОГ {code}: new={new} pages={pages}")
+
+            # Reconcile: сверка всех "активных" с API-выдачей
+            if not args.dry_run:
+                from reconcile import apply_reconcile
+                allowed_exp = set(s.profile.prefilter.experience_allowed)
+                rec = apply_reconcile(
+                    db, seen_acc, allowed_exp,
+                    dry_run=args.reconcile_dry_run,
+                )
+                log(f"RECONCILE{' (DRY)' if args.reconcile_dry_run else ''}: {rec['stats']}")
+                for vid, from_st, action in rec["touched"][:15]:
+                    log(f"  {vid}  {from_st} -> {action}")
+                if len(rec["touched"]) > 15:
+                    log(f"  ... ещё {len(rec['touched']) - 15}")
+            else:
+                log(f"DRY-RUN: reconcile пропущен, seen={len(seen_acc)} ID")
+
             elapsed = (datetime.now() - cycle_start).total_seconds()
-            log(f"ЦИКЛ ЗАВЕРШЁН: new={total_new} за {elapsed:.0f} сек")
+            log(f"ЦИКЛ ЗАВЕРШЁН: new={total_new} seen={len(seen_acc)} за {elapsed:.0f} сек")
             if args.once:
                 break
             log(f"Пауза {SLEEP_AFTER_CYCLE} сек до следующего цикла")

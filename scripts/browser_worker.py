@@ -17,7 +17,7 @@ from browser_backend import BrowserLaunchError, create_browser_backend
 from config import load_settings
 from database import Database, VacancyStatus
 from hh_client import CaptchaDetectedError, HHClient, VacancyExpiredError, VacancySummary
-from logging_setup import setup_logging
+from logging_setup import configure_logging
 
 import logging
 logger = logging.getLogger(__name__)
@@ -60,6 +60,17 @@ async def _apply_one(hh: HHClient, db: Database, settings, row: dict, notify) ->
         if ok:
             await notify(f"✓ Отклик отправлен: {title}")
             return "ok"
+        # hh_client мог сам пометить skipped (questionnaire_required)
+        _v = db.get(job_id)
+        if _v is not None and _v.status.value == "skipped":
+            await notify(f"⏭ Пропущено (анкета): {title}")
+            return "skip"
+        # AI11: pre_response_recheck — permit уже использован, отклик мог уйти.
+        # Это не ошибка для streak, но требует проверки. Defer, не считаем за error.
+        if _v is not None and "pre_response_recheck" in (_v.error_text or ""):
+            logger.warning("pre_response_recheck job_id=%s — defer, не считаем за error", job_id)
+            db.defer_apply_queue(job_id, 60)
+            return "skip"  # не увеличивает apply_streak_errors
         await notify(f"✗ Не удалось: {title}")
         db.defer_apply_queue(job_id, 5)
         return "error"
@@ -83,9 +94,11 @@ async def main() -> None:
     db = Database(str(settings.database_path))
     db.init()
 
+    from approval import ApprovalGuard
     backend = create_browser_backend(settings)
     context = await backend.start()
-    hh = HHClient(settings, context=context)
+    guard = ApprovalGuard(settings, db)
+    hh = HHClient(context, settings, db, guard)
 
     token = (settings.tg_bot_token or "").strip()
     chat_id = int(settings.tg_user_id or 0)
@@ -93,6 +106,10 @@ async def main() -> None:
 
     apply_streak_errors = 0
     read_streak_captcha = 0
+
+    _reset = db.reset_all_applying()
+    if _reset:
+        logger.warning("reset_stale_applying: %d вакансий вернулись в pending", _reset)
 
     logger.info("browser_worker started")
     try:
@@ -180,7 +197,7 @@ async def main() -> None:
 
 
 if __name__ == "__main__":
-    setup_logging()
+    configure_logging(Path("browser_worker.log"))
     try:
         asyncio.run(main())
     except BrowserLaunchError as exc:

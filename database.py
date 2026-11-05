@@ -523,7 +523,9 @@ class Database:
     def enqueue_apply(self, vacancy_id: str) -> bool:
         """Поставить вакансию в очередь на отклик (queue_priority=1).
 
-        Только для pending_approval с непустым cover_letter.
+        Только для pending_approval с непустым cover_letter,
+        прошедшим prefilter: salary >= 200k (или не указана),
+        exp_id in (between3And6, moreThan6) или NULL.
         """
         with self._connect() as connection:
             cur = connection.execute(
@@ -532,6 +534,27 @@ class Database:
                 SET queue_priority = 1, queued_at = datetime('now')
                 WHERE id = ? AND status = ?
                   AND cover_letter IS NOT NULL AND cover_letter != ''
+                  AND (
+                      -- верхний предел ("до Y" / "от X до Y"): Y > threshold
+                      (COALESCE(salary_to, 0) > 0 AND (
+                          (UPPER(COALESCE(salary_currency, '')) IN ('', 'RUR', 'RUB') AND salary_to > 200000)
+                          OR (UPPER(salary_currency) IN ('USD', 'EUR') AND salary_to > 3000)
+                          OR UPPER(COALESCE(salary_currency, '')) NOT IN ('', 'RUR', 'RUB', 'USD', 'EUR')
+                      ))
+                      -- только "от X": X >= threshold
+                      OR (COALESCE(salary_to, 0) = 0 AND COALESCE(salary_from, 0) > 0 AND (
+                          (UPPER(COALESCE(salary_currency, '')) IN ('', 'RUR', 'RUB') AND salary_from >= 200000)
+                          OR (UPPER(salary_currency) IN ('USD', 'EUR') AND salary_from >= 3000)
+                          OR UPPER(COALESCE(salary_currency, '')) NOT IN ('', 'RUR', 'RUB', 'USD', 'EUR')
+                      ))
+                      -- зарплата не указана
+                      OR (COALESCE(salary_from, 0) = 0 AND COALESCE(salary_to, 0) = 0)
+                  )
+                  AND (
+                      json_extract(evaluation_json, '$.experience_id') IS NULL
+                      OR json_extract(evaluation_json, '$.experience_id')
+                         IN ('between3And6', 'moreThan6')
+                  )
                 """,
                 (vacancy_id, VacancyStatus.PENDING_APPROVAL.value),
             )
@@ -778,7 +801,7 @@ class Database:
                 UPDATE vacancies
                 SET status = ?, llm_reason = ?,
                     evaluation_json = ?, queued_at = NULL, error_text = ''
-                WHERE id = ? AND status = ?
+                WHERE id = ? AND status IN (?, ?, ?)
                 """,
                 (
                     VacancyStatus.IRRELEVANT.value,
@@ -786,6 +809,8 @@ class Database:
                     evaluation_json,
                     job_id,
                     VacancyStatus.DISCOVERED.value,
+                    VacancyStatus.PENDING_APPROVAL.value,
+                    VacancyStatus.ANALYSIS_FAILED.value,
                 ),
             )
             return cursor.rowcount == 1
@@ -804,7 +829,7 @@ class Database:
                 UPDATE vacancies
                 SET status = ?, llm_decision = 0, llm_reason = ?,
                     evaluation_json = ?, queued_at = NULL, error_text = ''
-                WHERE id = ? AND status = ?
+                WHERE id = ? AND status IN (?, ?, ?, ?, ?)
                 """,
                 (
                     VacancyStatus.REJECTED_BY_FILTER.value,
@@ -812,6 +837,10 @@ class Database:
                     evaluation_json,
                     job_id,
                     VacancyStatus.DISCOVERED.value,
+                    VacancyStatus.PENDING_APPROVAL.value,
+                    VacancyStatus.ANALYSIS_FAILED.value,
+                    VacancyStatus.EXPIRED.value,
+                    VacancyStatus.IRRELEVANT.value,
                 ),
             )
             return cursor.rowcount == 1
@@ -1768,15 +1797,115 @@ class Database:
             )
             return cursor.rowcount
 
-    def pending(self) -> list[Vacancy]:
+    def pending(self, *, limit: int | None = None, offset: int = 0) -> list[Vacancy]:
+        """pending_approval, сортировка по confidence DESC (для карточек).
+        limit/offset — для пагинации в TG.
+        """
         with self._connect() as connection:
+            sql = (
+                "SELECT * FROM vacancies WHERE status = ? "
+                "ORDER BY COALESCE(confidence, 0) DESC, discovered_at DESC"
+            )
+            params: list = [VacancyStatus.PENDING_APPROVAL.value]
+            if limit is not None:
+                sql += " LIMIT ? OFFSET ?"
+                params.extend([int(limit), int(offset)])
             return [
                 self._vacancy(row)
-                for row in connection.execute(
-                    "SELECT * FROM vacancies WHERE status = ? ORDER BY discovered_at",
-                    (VacancyStatus.PENDING_APPROVAL.value,),
-                ).fetchall()
+                for row in connection.execute(sql, params).fetchall()
             ]
+
+    def count_pending(self) -> int:
+        """Сколько pending_approval (для пагинации)."""
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT COUNT(*) FROM vacancies WHERE status = ?",
+                (VacancyStatus.PENDING_APPROVAL.value,),
+            ).fetchone()
+            return int(row[0]) if row else 0
+
+    def revive_vacancy(
+        self, job_id: str, *, new_status: str, experience_id: str | None,
+        reconcile_reason: str = "revived",
+    ) -> bool:
+        """Оживить expired/irrelevant/analysis_failed → discovered/pending_approval."""
+        import json as _json
+        with self._connect() as connection:
+            row = connection.execute(
+                "SELECT evaluation_json FROM vacancies WHERE id=?", (job_id,)
+            ).fetchone()
+            existing = row["evaluation_json"] if row else ""
+            try:
+                data = _json.loads(existing) if existing else {}
+            except (ValueError, TypeError):
+                data = {}
+            if not isinstance(data, dict):
+                data = {}
+            data["experience_id"] = experience_id
+            data["reconcile"] = reconcile_reason
+            cur = connection.execute(
+                """
+                UPDATE vacancies
+                SET status = ?, evaluation_json = ?, queued_at = NULL, error_text = ''
+                WHERE id = ? AND status IN (?, ?, ?)
+                """,
+                (
+                    new_status,
+                    _json.dumps(data, ensure_ascii=False),
+                    job_id,
+                    VacancyStatus.EXPIRED.value,
+                    VacancyStatus.IRRELEVANT.value,
+                    VacancyStatus.ANALYSIS_FAILED.value,
+                ),
+            )
+            return cur.rowcount == 1
+
+    def mark_skipped_by_id(self, job_id: str, *, reason: str = "") -> bool:
+        """Пометить вакансию skipped (например, questionnaire_required)."""
+        with self._connect() as connection:
+            cur = connection.execute(
+                """
+                UPDATE vacancies
+                SET status = ?, queue_priority = 0, queued_at = NULL, error_text = ?
+                WHERE id = ? AND status IN (?, ?, ?)
+                """,
+                (
+                    VacancyStatus.SKIPPED.value,
+                    reason[:200],
+                    job_id,
+                    VacancyStatus.PENDING_APPROVAL.value,
+                    VacancyStatus.APPLYING.value,
+                    VacancyStatus.APPROVED.value,
+                ),
+            )
+            return cur.rowcount > 0
+
+    def reset_all_applying(self) -> int:
+        """Сбросить ВСЕ applying → pending_approval (на старте browser_worker, single instance)."""
+        with self._connect() as connection:
+            cur = connection.execute(
+                "UPDATE vacancies SET status=?, queue_priority=0, queued_at=NULL WHERE status=?",
+                (VacancyStatus.PENDING_APPROVAL.value, VacancyStatus.APPLYING.value),
+            )
+            return cur.rowcount
+
+    def reset_stale_applying(self, minutes: int = 15) -> int:
+        """Сбросить зависшие applying (старше N минут) в pending_approval."""
+        with self._connect() as connection:
+            cur = connection.execute(
+                """
+                UPDATE vacancies
+                SET status = ?, queued_at = NULL
+                WHERE status = ?
+                  AND (queued_at IS NULL OR queued_at <= datetime('now', ? || ' minutes'))
+                """,
+                (
+                    VacancyStatus.PENDING_APPROVAL.value,
+                    VacancyStatus.APPLYING.value,
+                    f"-{int(minutes)}",
+                ),
+            )
+            return cur.rowcount
 
     def stats(self) -> dict[str, int]:
         counts = {status.value: 0 for status in VacancyStatus}

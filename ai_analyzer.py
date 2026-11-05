@@ -652,6 +652,7 @@ class VacancyAnalyzer:
         session_id: str | None = None,
         best_resume: str | None = None,
         resume_text: str | None = None,
+        cache_control: bool = True,
     ) -> str:
         cover = self.settings.profile.cover_letter
         greeting = "Добрый день!"

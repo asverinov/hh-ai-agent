@@ -24,9 +24,12 @@ from aiogram.types import (
     InputRichMessage,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    KeyboardButton,
     Message,
     RichTextBold,
     RichTextUrl,
+    ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
 )
 
 from approval import ApprovalService
@@ -232,6 +235,10 @@ class TelegramService:
             self._show_pending_callback,
             F.data == "show_pending",
         )
+        self.dispatcher.callback_query.register(
+            self._pending_page_callback,
+            F.data.startswith("pending_page:"),
+        )
         self.dispatcher.message.register(self._text_handler)
 
     async def _command_handler(self, message: Message) -> None:
@@ -286,10 +293,17 @@ class TelegramService:
         if action == "apply":
             ok = self.database.enqueue_apply(job_id)
             if not ok:
-                await callback.answer(
-                    "❌ Нельзя в очередь: нет письма или вакансия уже не pending.",
-                    show_alert=True,
-                )
+                # Разбираемся, почему: нет письма / не pending / не прошло prefilter
+                _v = self.database.get(job_id)
+                _why = "вакансия уже обработана"
+                if _v is not None and _v.status.value == "pending_approval":
+                    if not (_v.cover_letter or "").strip():
+                        _why = "нет сопроводительного письма"
+                    elif _v.salary_from and _v.salary_from < 200000:
+                        _why = f"ЗП {_v.salary_from} < 200k (prefilter)"
+                    else:
+                        _why = "не прошло prefilter (опыт/ЗП)"
+                await callback.answer(f"❌ В очередь не поставлено: {_why}", show_alert=True)
                 return
             queue_n = self.database.count_apply_queue()
             await callback.answer(f"✅ В очереди: {queue_n}-я", show_alert=False)
@@ -588,6 +602,24 @@ class TelegramService:
         if self._edit_future and not self._edit_future.done() and message.text:
             self._edit_future.set_result(message.text.strip())
             return
+        # Кнопки главного меню (ReplyKeyboard)
+        _txt = (text or "").strip()
+        if _txt == "📋 Выдать 20 карточек":
+            await self._send_pending_cards(offset=0, limit=20)
+            return
+        if _txt == "📊 Статус":
+            stats = self.database.stats()
+            processed = sum(stats.values())
+            parts = ["📊 <b>Статус агента</b>\n"]
+            for k, v in sorted(stats.items(), key=lambda kv: -kv[1]):
+                if v:
+                    parts.append(f"• {k}: {v}")
+            parts.append(f"\nВсего: {processed}")
+            await message.answer("\n".join(parts), parse_mode="HTML")
+            return
+        if _txt == "🔍 Показать меню":
+            await message.answer("Меню:", reply_markup=self._main_menu_keyboard())
+            return
         key_session = self._mistral_key_input
         if key_session is None:
             return
@@ -865,42 +897,70 @@ class TelegramService:
         )
 
     async def _show_pending_callback(self, callback: CallbackQuery) -> None:
-        pending = sorted(
-            self.database.pending(),
-            key=lambda v: (v.confidence or 0.0),
-            reverse=True,
-        )
-        if not pending:
-            await self._answer_callback(
-                callback, "Нет рекомендованных вакансий.", show_alert=True
-            )
-            return
-        lines = [f"\U0001F4CB <b>Актуальные вакансии ({len(pending)}):</b>\n"]
-        for i, v in enumerate(pending, 1):
-            conf = f"{v.confidence:.0%}" if v.confidence is not None else "\u2014"
-            salary = ""
-            if v.salary_from or v.salary_to:
-                s_from = v.salary_from or "?"
-                s_to = v.salary_to or "?"
-                salary = f" \u00b7 {s_from}\u2013{s_to}"
-            url = html.escape(v.url, quote=True)
-            title = html.escape((v.title or "")[:70])
-            company = html.escape((v.company or "\u2014")[:40])
-            lines.append(f"{i}. <a href=\"{url}\">{title}</a>\n   {company} \u00b7 {conf}{salary}")
-        text = "\n".join(lines)
-        if len(text) > 4000:
-            text = text[:3980] + "\n\u2026"
+        """Показать 20 карточек pending_approval (пагинация через pending_page:N)."""
+        await callback.answer("Отправляю 20 карточек…")
+        await self._send_pending_cards(offset=0, limit=20)
+
+    async def _pending_page_callback(self, callback: CallbackQuery) -> None:
+        """Кнопка «Следующие 20»: pending_page:<offset>."""
         try:
+            offset = int((callback.data or "").split(":", 1)[1])
+        except (ValueError, IndexError):
+            await self._answer_callback(callback, "Некорректная страница.", show_alert=True)
+            return
+        await callback.answer(f"Отправляю с {offset+1}…")
+        await self._send_pending_cards(offset=offset, limit=20)
+
+    async def _send_pending_cards(self, *, offset: int, limit: int = 20) -> None:
+        """Отправить limit карточек начиная с offset. Если есть ещё — кнопка «Следующие»."""
+        total = self.database.count_pending()
+        if total == 0:
+            await self.notify("Нет рекомендованных вакансий.")
+            return
+        cards = self.database.pending(limit=limit, offset=offset)
+        if not cards:
+            await self.notify(f"Больше нет карточек (offset={offset} из {total}).")
+            return
+        end = offset + len(cards)
+        await self.notify(
+            f"📋 Вакансии {offset+1}–{end} из {total}. "
+            f"Отправляю {len(cards)} карточек…"
+        )
+        for i, v in enumerate(cards, 1):
+            try:
+                await self.send_preview(v, include_actions=True)
+            except Exception as exc:
+                logger.warning("send_card_failed id=%s err=%s", v.id, exc)
+            if i < len(cards):
+                await asyncio.sleep(1.0)
+        if end < total:
+            keyboard = InlineKeyboardMarkup(
+                inline_keyboard=[[
+                    InlineKeyboardButton(
+                        text=f"📋 Следующие {min(limit, total-end)}",
+                        callback_data=f"pending_page:{end}",
+                    ),
+                ]]
+            )
             await self.bot.send_message(
                 chat_id=self.settings.tg_user_id,
-                text=text,
-                parse_mode="HTML",
-                disable_web_page_preview=True,
+                text=f"Осталось {total-end}. Нажмите, чтобы получить ещё 20:",
+                reply_markup=keyboard,
             )
-            await callback.answer("Список отправлен")
-        except Exception as exc:
-            logger.warning("show_pending_failed error=%s", exc)
-            await callback.answer("Не удалось отправить список", show_alert=True)
+        else:
+            await self.notify(f"✅ Все карточки показаны ({total}).")
+
+    def _main_menu_keyboard(self) -> ReplyKeyboardMarkup:
+        """Главное меню (постоянное, внизу экрана)."""
+        return ReplyKeyboardMarkup(
+            keyboard=[
+                [KeyboardButton(text="📋 Выдать 20 карточек")],
+                [KeyboardButton(text="📊 Статус"), KeyboardButton(text="🔍 Показать меню")],
+            ],
+            resize_keyboard=True,
+            is_persistent=True,
+            input_field_placeholder="Кнопки или /команды",
+        )
 
     async def notify_bootstrap(self, stats: dict[str, int], pending_count: int) -> None:
         def g(k: str) -> int:
@@ -918,7 +978,7 @@ class TelegramService:
             f"\u2022 \U0001F195 В очереди на анализ: {g('discovered')}\n\n"
         )
         if pending_count:
-            text += f"Отправляю {pending_count} карточек рекомендаций\u2026"
+            text += f"Ждут решения: {pending_count}. Нажмите кнопку «📋 Выдать 20 карточек» в меню."
         else:
             text += "Рекомендаций в очереди нет."
         try:
@@ -926,6 +986,7 @@ class TelegramService:
                 chat_id=self.settings.tg_user_id,
                 text=text,
                 parse_mode="HTML",
+                reply_markup=self._main_menu_keyboard(),
                 disable_web_page_preview=True,
             )
         except Exception as exc:

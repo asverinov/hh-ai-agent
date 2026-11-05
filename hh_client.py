@@ -65,7 +65,6 @@ class PageState(str, Enum):
     NETWORK_ERROR = "network_error"
 
 
-@dataclass(frozen=True)
 class CaptchaDetectedError(RuntimeError):
     """hh.ru показал капчу — нужен VNC, стоп."""
 
@@ -74,6 +73,7 @@ class VacancyExpiredError(RuntimeError):
     """Вакансия закрыта/скрыта — пропускаем."""
 
 
+@dataclass(frozen=True)
 class VacancySummary:
     id: str
     title: str
@@ -1201,6 +1201,12 @@ class HHClient:
             if await page.locator('textarea[name^="task_"]').count() > 0:
                 raise QuestionnaireRequiredError("questionnaire_required")
 
+            # AI11: закрыть drop-base модалку, если она перекрывает
+            try:
+                await page.keyboard.press("Escape")
+                await self._delay()
+            except Exception:
+                pass
             letter_toggle = (
                 page.locator('[data-qa*="letter-toggle"]')
                 .or_(page.get_by_text("Написать сопроводительное", exact=False))
@@ -1241,7 +1247,7 @@ class HHClient:
                 .or_(page.get_by_text("Отклик отправлен", exact=False))
                 .first
             )
-            await success_marker.wait_for(state="visible", timeout=5_000)
+            await success_marker.wait_for(state="visible", timeout=15000_000)
             if not await self._response_confirmed(page, vacancy.url):
                 raise RuntimeError("HH.ru did not confirm the application")
             if required_portfolio:
@@ -1291,7 +1297,15 @@ class HHClient:
                 permission.job_id,
                 response_still_available,
             )
+            self.database.mark_skipped_by_id(
+                permission.job_id, reason='questionnaire_required'
+            )
             return False
+        except CaptchaDetectedError:
+            raise
+        except VacancyExpiredError:
+            raise
+
         except Exception as exc:
             self.database.complete_application(
                 permission.job_id,
